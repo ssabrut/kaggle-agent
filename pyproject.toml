@@ -1,0 +1,34 @@
+[project]
+name = "kagent"
+version = "0.1.0"
+description = "Autonomous Kaggle agent: tree search over solution scripts with an isolated grader"
+requires-python = ">=3.11"
+dependencies = [
+    "kaggle>=1.6",
+    "pandas>=2.2",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "scikit-learn>=1.5",
+    "typer>=0.12",
+]
+
+[project.scripts]
+kagent = "kagent.cli:app"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.5"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kagent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["docker: needs a running Docker daemon and built images"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]

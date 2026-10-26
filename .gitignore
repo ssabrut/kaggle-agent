@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# kagent competition workspaces (data, runs, submissions)
+workspaces/
