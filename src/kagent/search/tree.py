@@ -99,15 +99,22 @@ class SolutionTree:
         with the incumbent, not the previous node, lets several small gains add up to a real one.
         With noise_k = 0 this is the plain best node, earliest first on a tie.
         """
+        trail = self.incumbent_trail(noise_k)
+        return trail[-1][1] if trail else None
+
+    def incumbent_trail(self, noise_k: float = 0.0) -> list[tuple[Node, Node]]:
+        """For each ok node in creation order, the incumbent once that node has been considered."""
+        trail: list[tuple[Node, Node]] = []
         incumbent: Node | None = None
         for node in self.ok_nodes():
             if incumbent is None:
                 incumbent = node
-                continue
-            floor = noise_k * max(node.cv_std or 0.0, incumbent.cv_std or 0.0)
-            if self.rank_value(node) - self.rank_value(incumbent) > floor:
-                incumbent = node
-        return incumbent
+            else:
+                floor = noise_k * max(node.cv_std or 0.0, incumbent.cv_std or 0.0)
+                if self.rank_value(node) - self.rank_value(incumbent) > floor:
+                    incumbent = node
+            trail.append((node, incumbent))
+        return trail
 
     def rank_value(self, node: Node, robust: bool = False) -> float:
         """Larger is better regardless of metric direction."""

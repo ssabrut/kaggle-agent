@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kagent dashboard</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="logo">kagent</span><span id="comp" class="muted"></span></div>
+  <div id="pill" class="pill" role="status"></div>
+  <div id="now" class="now"></div>
+  <div id="live" class="live"></div>
+  <button id="theme" class="btn" type="button">Theme</button>
+  <div id="budget" class="budget" hidden>
+    <div class="track"><div id="budget-fill" class="fill"></div></div>
+    <span id="budget-text" class="text"></span>
+  </div>
+</header>
+
+<nav class="filters" aria-label="Filters">
+  <div class="group" id="f-op"><span class="label">Operator</span></div>
+  <div class="group" id="f-status"><span class="label">Status</span></div>
+  <label class="check"><input type="checkbox" id="follow" checked> Follow newest</label>
+</nav>
+
+<section class="kpis" id="kpis" aria-label="Key numbers"></section>
+
+<main class="grid" id="grid">
+  <section class="card span-8" aria-labelledby="h-timeline">
+    <h2 id="h-timeline">Score of each node</h2>
+    <p class="sub" id="timeline-sub"></p>
+    <div class="chart" id="timeline"></div>
+    <div class="legend" id="timeline-legend"></div>
+  </section>
+
+  <section class="card span-4" aria-labelledby="h-gains">
+    <h2 id="h-gains">Gain over parent, against noise</h2>
+    <p class="sub">Up is better. Gray bars changed less than the fold-to-fold noise.</p>
+    <div class="chart" id="gains"></div>
+    <div class="legend" id="gains-legend"></div>
+  </section>
+
+  <section class="card span-8" aria-labelledby="h-tree">
+    <h2 id="h-tree">Solution tree</h2>
+    <p class="sub">Each node is a script. The ringed node is what the search builds on next.</p>
+    <div class="tree-box" id="tree"></div>
+    <div class="legend" id="tree-legend"></div>
+  </section>
+
+  <section class="card span-4" aria-labelledby="h-funnel">
+    <h2 id="h-funnel">How far runs got</h2>
+    <p class="sub">The last step each run finished, from the files it left and its STAGE lines.</p>
+    <div class="chart" id="funnel"></div>
+    <h2 class="sub-h" id="h-ops">Operators</h2>
+    <div id="operators"></div>
+  </section>
+
+  <section class="card span-12" aria-labelledby="h-table">
+    <h2 id="h-table">All nodes</h2>
+    <p class="sub" id="table-sub"></p>
+    <div class="table-wrap"><table id="nodes-table"></table></div>
+  </section>
+
+  <section class="card span-5" aria-labelledby="h-feed">
+    <h2 id="h-feed">Activity</h2>
+    <p class="sub">Newest first.</p>
+    <ul class="feed" id="feed"></ul>
+  </section>
+
+  <section class="card span-4" aria-labelledby="h-llm">
+    <h2 id="h-llm">Models</h2>
+    <p class="sub" id="llm-sub"></p>
+    <div id="llm"></div>
+  </section>
+
+  <section class="card span-3" aria-labelledby="h-side">
+    <h2 id="h-side">Package requests</h2>
+    <p class="sub">Decide in a terminal; this page only shows them.</p>
+    <ul class="list" id="deps"></ul>
+    <h2 class="sub-h" id="h-block">Do-not-repeat list</h2>
+    <p class="sub">What the planner is told has failed or not helped.</p>
+    <ul class="list" id="blocklist"></ul>
+    <p class="hint" id="params"></p>
+  </section>
+</main>
+
+<aside id="drawer" class="drawer" hidden aria-label="Node detail"></aside>
+<div id="modal" class="modal" hidden></div>
+<div id="tip" class="tip" role="tooltip" hidden></div>
+<noscript><p class="empty">This dashboard needs JavaScript.</p></noscript>
+<script src="/app.js" defer></script>
+</body>
+</html>

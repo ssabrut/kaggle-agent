@@ -1,5 +1,6 @@
 """Search loop with scripted models and a stubbed runner (no Docker, no network)."""
 
+import json
 import re
 
 import pytest
@@ -108,6 +109,26 @@ def test_node_dies_after_max_debug_attempts_and_search_restarts(ws, settings, pa
         ("buggy", 0), ("buggy", 1), ("dead", 2), ("buggy", 0),
     ]  # fmt: skip
     assert tree.nodes[3].operator == "draft"
+
+
+def test_status_and_events_follow_the_search_and_end_cleanly(ws, settings, parts):
+    _search(ws, settings, parts, [marker("# CV=0.7")], max_nodes=1)
+
+    status = json.loads((ws.search_dir / "status.json").read_text())
+    assert (status["state"], status["message"]) == ("finished", "reached max nodes (1)")
+    events = [
+        json.loads(line) for line in (ws.search_dir / "events.jsonl").read_text().splitlines()
+    ]
+    assert [e["seq"] for e in events] == list(range(1, len(events) + 1))
+    assert any(e["node"] == "n001" and "n001 draft: ok" in e["text"] for e in events)
+
+
+def test_status_says_stopped_when_the_search_fails(ws, settings, parts):
+    with pytest.raises(OperatorFailures):
+        _search(ws, settings, parts, ["no code"] * 10, max_nodes=5)
+
+    status = json.loads((ws.search_dir / "status.json").read_text())
+    assert status["state"] == "stopped" and "OperatorFailures" in status["message"]
 
 
 def test_stage_is_recorded_logged_and_handed_to_debug(ws, settings, parts):

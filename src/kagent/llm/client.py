@@ -10,12 +10,21 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 
 import httpx
 
 Message = dict[str, str]
 
 _RETRY_STATUS = {429, 500, 502, 503, 504}
+
+
+class CallObserver(Protocol):
+    """Told when a call starts and ends, so a status display can show what is being waited on."""
+
+    def call_started(self, role: str) -> None: ...
+
+    def call_finished(self, role: str) -> None: ...
 
 
 class LLMError(RuntimeError):
@@ -46,7 +55,9 @@ class ChatClient:
         attempts: int = 3,
         transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        observer: CallObserver | None = None,
     ) -> None:
+        self.observer = observer
         self.model = model
         self.role = role
         self.max_tokens = max_tokens
@@ -70,7 +81,13 @@ class ChatClient:
             "temperature": self.temperature if temperature is None else temperature,
         }
         start = time.monotonic()
-        data = self._post(payload)
+        if self.observer:
+            self.observer.call_started(self.role)
+        try:
+            data = self._post(payload)
+        finally:
+            if self.observer:
+                self.observer.call_finished(self.role)
         try:
             choice = data["choices"][0]
             text = strip_thinking(choice["message"]["content"] or "")

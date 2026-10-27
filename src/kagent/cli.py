@@ -1,7 +1,10 @@
 import shutil
 import subprocess
 import tempfile
+import threading
+import webbrowser
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated
 
@@ -16,6 +19,9 @@ from kagent.competition_page import (
     save_pages,
 )
 from kagent.config import CompetitionConfig, Settings
+from kagent.dashboard.demo import DemoRun
+from kagent.dashboard.reader import WorkspaceReader
+from kagent.dashboard.server import is_loopback, make_server
 from kagent.deps.gate import DepGate
 from kagent.deps.install import InstallError, approve_request, deny_request
 from kagent.deps.store import DependencyStore
@@ -28,6 +34,7 @@ from kagent.llm.client import ChatClient, LLMError
 from kagent.search.loop import IntegrityAbort, OperatorFailures, open_tree, run_search
 from kagent.search.operators import DebugOperator, DraftOperator, ImproveOperator
 from kagent.search.policies import GreedyPolicy
+from kagent.search.progress import Progress
 from kagent.search.select import CHOICES, select_best, selected_run_id
 from kagent.submit import SubmitRefused, submit
 from kagent.workspace import Workspace
@@ -239,6 +246,22 @@ def search(
     description = ws.description_path.read_text() if ws.description_path.exists() else ""
     eda_text = ws.eda_path.read_text() if ws.eda_path.exists() else write_profile(ws, config)
 
+    noise = settings.promotion_noise_k if noise_k is None else noise_k
+    progress = Progress(
+        ws,
+        budget_s=budget_hours * 3600,
+        params={
+            "policy": policy,
+            "noise_k": noise,
+            "num_drafts": num_drafts,
+            "max_nodes": max_nodes,
+            "max_debug": max_debug,
+            "planner_model": settings.planner_model,
+            "coder_model": settings.coder_model,
+        },
+    )
+    typer.echo(f"follow along: kagent dashboard -c {competition}")
+
     trajectory = ws.search_dir / "trajectory.jsonl"
     planner = ChatClient(
         settings.planner_base_url,
@@ -248,6 +271,7 @@ def search(
         max_tokens=settings.llm_max_tokens,
         temperature=0.7,
         log_path=trajectory,
+        observer=progress,
     )
     coder = ChatClient(
         settings.coder_base_url,
@@ -257,6 +281,7 @@ def search(
         max_tokens=settings.llm_max_tokens,
         temperature=0.2,
         log_path=trajectory,
+        observer=progress,
     )
     operators = {
         "draft": DraftOperator(planner, coder),
@@ -271,10 +296,7 @@ def search(
             config,
             settings,
             tree,
-            GreedyPolicy(
-                num_drafts=num_drafts,
-                noise_k=settings.promotion_noise_k if noise_k is None else noise_k,
-            ),
+            GreedyPolicy(num_drafts=num_drafts, noise_k=noise),
             operators,
             planner,
             description=description,
@@ -284,6 +306,7 @@ def search(
             max_debug=max_debug,
             deps=gate,
             log=typer.echo,
+            progress=progress,
         )
     except (LLMError, IntegrityAbort, OperatorFailures, DockerError) as exc:
         typer.echo(f"search stopped: {exc}", err=True)
@@ -339,6 +362,71 @@ def submit_cmd(
         typer.echo("dry run, would execute:\n  " + " ".join(result.command))
     else:
         typer.echo(result.output or "submitted")
+
+
+@app.command()
+def dashboard(
+    competition: Annotated[
+        str | None, typer.Option("--competition", "-c", help="Kaggle competition slug.")
+    ] = None,
+    host: Annotated[
+        str,
+        typer.Option(
+            help="Interface to listen on. Anything but loopback shows your code and prompts "
+            "to the network."
+        ),
+    ] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="Port to listen on; 0 picks a free one.")] = 8765,
+    open_browser: Annotated[
+        bool, typer.Option("--open/--no-open", help="Open the page in a browser.")
+    ] = True,
+    demo: Annotated[
+        bool, typer.Option(help="Show an invented search that advances in real time.")
+    ] = False,
+) -> None:
+    """Live, read-only dashboard of a search. Run it beside `kagent search`."""
+    settings = Settings()
+    if demo:
+        with tempfile.TemporaryDirectory(prefix="kagent-demo-") as tmp:
+            run = DemoRun(Workspace(Path(tmp) / "demo"))
+            run.populate(6)
+            _serve(run.ws, settings, host, port, open_browser, then=run.play)
+        return
+    if competition is None:
+        raise typer.BadParameter("pass --competition, or --demo to see an invented search")
+    ws = Workspace.for_slug(settings, competition)
+    if not ws.config_path.exists():
+        raise typer.BadParameter(f"{ws.config_path} missing; run `kagent init` first")
+    _serve(ws, settings, host, port, open_browser)
+
+
+def _serve(
+    ws: Workspace,
+    settings: Settings,
+    host: str,
+    port: int,
+    open_browser: bool,
+    then: Callable[[], None] | None = None,
+) -> None:
+    try:
+        server = make_server(WorkspaceReader(ws, settings), host, port)
+    except OSError as exc:
+        typer.echo(f"cannot listen on {host}:{port}: {exc}; try --port 0", err=True)
+        raise typer.Exit(1) from exc
+    url = f"http://{host}:{server.server_address[1]}/"
+    typer.echo(f"dashboard for {ws.root.name} at {url} (read-only; Ctrl-C to stop)")
+    if not is_loopback(host):
+        typer.echo("warning: reachable by the network; shows code, logs, prompts", err=True)
+    if open_browser:
+        webbrowser.open(url)
+    if then is not None:
+        threading.Thread(target=then, daemon=True).start()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
 
 
 deps_app = typer.Typer(no_args_is_help=True, help="Review the agent's package requests.")

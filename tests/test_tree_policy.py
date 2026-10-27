@@ -83,6 +83,20 @@ def test_incumbent_without_noise_floor_is_the_plain_best(tmp_path):
     assert tree.incumbent().id == tree.best().id == "n003"  # first of the tied 0.8001 nodes
 
 
+def test_incumbent_trail_follows_each_node_in_creation_order(tmp_path):
+    tree = _tree(tmp_path)
+    _add(tree, cv=0.800, std=0.01)
+    _add(tree, "buggy")  # not considered
+    _add(tree, cv=0.802, std=0.01)  # inside the floor
+    _add(tree, cv=0.820, std=0.01)  # clears it
+
+    trail = [(node.id, inc.id) for node, inc in tree.incumbent_trail(0.5)]
+
+    assert trail == [("n001", "n001"), ("n003", "n001"), ("n004", "n004")]
+    assert tree.incumbent(0.5).id == trail[-1][1]
+    assert _tree(tmp_path / "empty").incumbent_trail() == []
+
+
 def test_gain_inside_the_noise_floor_does_not_promote(tmp_path):
     tree = _tree(tmp_path)
     _add(tree, cv=0.800, std=0.01)

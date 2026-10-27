@@ -14,6 +14,7 @@ from kagent.llm.client import ChatClient
 from kagent.search.blocklist import build_blocklist
 from kagent.search.operators import Context, Operator, OperatorError, summarize
 from kagent.search.policies import SearchPolicy
+from kagent.search.progress import Progress
 from kagent.search.tree import Node, SolutionTree, Status
 from kagent.workspace import Workspace
 
@@ -185,85 +186,112 @@ def run_search(
     deps: DepGate | None = None,
     log: Callable[[str], None] = lambda _: None,
     clock: Callable[[], float] = time.monotonic,
+    progress: Progress | None = None,
 ) -> SolutionTree:
     target = ws.target_column(config)
     deadline = clock() + budget_s
     start_size = len(tree)
     failures = 0
     (ws.search_dir / "nodes").mkdir(parents=True, exist_ok=True)
+    progress = progress or Progress(ws, budget_s=budget_s)
 
-    while True:
-        remaining = deadline - clock()
-        if remaining < MIN_STEP_S:
-            log("time budget used up")
-            break
-        if max_nodes is not None and len(tree) - start_size >= max_nodes:
-            log(f"reached max nodes ({max_nodes})")
-            break
+    def say(text: str, node: str | None = None) -> None:
+        log(text)
+        progress.event(text, node=node)
 
-        step_timeout = int(min(settings.step_timeout_s, remaining))
-        if deps is not None:
-            _settle_blocked(
-                ws, config, settings, tree, planner, deps, run, log,
-                step_timeout=step_timeout, max_debug=max_debug,
-            )  # fmt: skip
+    def run_tracked(ws_: Workspace, script: Path, settings_: Settings) -> harness.RunRecord:
+        progress.phase("running", node=script.stem, detail="sandbox and grader")
+        return run(ws_, script, settings_)
 
-        action = policy.select(tree)
-        parent = action.parent
-        libraries = sandbox_versions(settings.docker_dir)
-        ctx = Context(
-            description=description,
-            eda=eda,
-            metric=config.metric,
-            higher_is_better=tree.higher_is_better,
-            id_column=config.id_column,
-            target=target,
-            tree=tree,
-            step_timeout_s=step_timeout,
-            remaining_s=remaining,
-            libraries=libraries,
-            sandbox_cpus=settings.sandbox_cpus,
-            sandbox_memory=settings.sandbox_memory,
-            error_log=parent.error if action.operator == "debug" and parent else "",
-            stage=parent.stage if action.operator == "debug" and parent else "",
-            blocklist=build_blocklist(
-                tree,
-                {normalize(name) for name in libraries},
-                skip_children_of=parent.id if parent and action.operator == "improve" else None,
-            ),
-        )
+    reason = ""
+    try:
+        while True:
+            remaining = deadline - clock()
+            if remaining < MIN_STEP_S:
+                reason = "time budget used up"
+                say(reason)
+                break
+            if max_nodes is not None and len(tree) - start_size >= max_nodes:
+                reason = f"reached max nodes ({max_nodes})"
+                say(reason)
+                break
 
-        try:
-            code = operators[action.operator].apply(parent, ctx)
-        except OperatorError as exc:
-            failures += 1
-            log(
-                f"{action.operator}: unusable code from model ({exc}) [{failures}/{max_operator_failures}]"
+            progress.phase("selecting", node=None, op=None)
+            step_timeout = int(min(settings.step_timeout_s, remaining))
+            if deps is not None:
+                _settle_blocked(
+                    ws, config, settings, tree, planner, deps, run_tracked, say,
+                    step_timeout=step_timeout, max_debug=max_debug,
+                )  # fmt: skip
+
+            action = policy.select(tree)
+            parent = action.parent
+            progress.phase(
+                "writing",
+                node=tree.next_id(),
+                op=action.operator,
+                detail=f"from {parent.id}" if parent else "new draft",
             )
-            if failures >= max_operator_failures:
-                raise OperatorFailures(str(exc)) from exc
-            continue
-        failures = 0
+            libraries = sandbox_versions(settings.docker_dir)
+            listed_above = parent.id if parent and action.operator == "improve" else None
+            ctx = Context(
+                description=description,
+                eda=eda,
+                metric=config.metric,
+                higher_is_better=tree.higher_is_better,
+                id_column=config.id_column,
+                target=target,
+                tree=tree,
+                step_timeout_s=step_timeout,
+                remaining_s=remaining,
+                libraries=libraries,
+                sandbox_cpus=settings.sandbox_cpus,
+                sandbox_memory=settings.sandbox_memory,
+                error_log=parent.error if action.operator == "debug" and parent else "",
+                stage=parent.stage if action.operator == "debug" and parent else "",
+                blocklist=build_blocklist(
+                    tree, {normalize(name) for name in libraries}, skip_children_of=listed_above
+                ),
+            )
 
-        node_id = tree.next_id()
-        code_path = ws.search_dir / "nodes" / f"{node_id}.py"
-        code_path.write_text(code)
-        record = run(ws, code_path, settings.model_copy(update={"step_timeout_s": step_timeout}))
+            try:
+                code = operators[action.operator].apply(parent, ctx)
+            except OperatorError as exc:
+                failures += 1
+                say(
+                    f"{action.operator}: unusable code from model ({exc}) "
+                    f"[{failures}/{max_operator_failures}]"
+                )
+                if failures >= max_operator_failures:
+                    raise OperatorFailures(str(exc)) from exc
+                continue
+            failures = 0
 
-        base = Node(
-            id=node_id,
-            parent=parent.id if parent else None,
-            operator=action.operator,
-            code_path=code_path,
-            status="buggy",
-            run_id=record.run_id,
-            debug_depth=parent.debug_depth + 1 if action.operator == "debug" and parent else 0,
-        )
-        _evaluate(
-            base, record, code=code, ws=ws, config=config, tree=tree, planner=planner,
-            deps=deps, step_timeout=step_timeout, max_debug=max_debug,
-        )  # fmt: skip
-        tree.add(base)
-        log(_describe(base, action.operator))
+            node_id = tree.next_id()
+            code_path = ws.search_dir / "nodes" / f"{node_id}.py"
+            code_path.write_text(code)
+            record = run_tracked(
+                ws, code_path, settings.model_copy(update={"step_timeout_s": step_timeout})
+            )
 
+            base = Node(
+                id=node_id,
+                parent=parent.id if parent else None,
+                operator=action.operator,
+                code_path=code_path,
+                status="buggy",
+                run_id=record.run_id,
+                debug_depth=parent.debug_depth + 1 if action.operator == "debug" and parent else 0,
+            )
+            progress.phase("evaluating", detail="grading and summarizing")
+            _evaluate(
+                base, record, code=code, ws=ws, config=config, tree=tree, planner=planner,
+                deps=deps, step_timeout=step_timeout, max_debug=max_debug,
+            )  # fmt: skip
+            tree.add(base)
+            say(_describe(base, action.operator), node=base.id)
+    except BaseException as exc:  # includes Ctrl-C: never leave a dead search marked running
+        progress.finish("stopped", f"{type(exc).__name__}: {exc}")
+        raise
+    progress.finish("finished", reason)
     return tree
