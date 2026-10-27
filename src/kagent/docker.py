@@ -6,6 +6,22 @@ from dataclasses import dataclass
 from pathlib import Path
 
 TAIL_BYTES = 4000
+HEAD_BYTES = 1000
+
+# What the docker CLI prints when it cannot start the container at all. Docker writes these
+# before the container exists, so they sit at the very top of stderr, ahead of any script output.
+_INFRA_MARKERS = (
+    "failed to connect to the docker api",
+    "cannot connect to the docker daemon",
+    "is the docker daemon running",
+    "unable to find image",
+    "docker: error response from daemon",
+    "docker: invalid",
+)
+
+
+class DockerError(RuntimeError):
+    """Docker itself failed (daemon down, image or mount problem); the script never ran."""
 
 
 @dataclass(frozen=True)
@@ -34,6 +50,19 @@ def docker_available() -> bool:
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+
+
+def _head(path: Path) -> str:
+    with path.open("rb") as fh:
+        return fh.read(HEAD_BYTES).decode(errors="replace")
+
+
+def _docker_failure(stderr_path: Path) -> str | None:
+    """The docker CLI's own error, if it is what ended the run; None for an ordinary failure."""
+    lines = [ln.strip() for ln in _head(stderr_path).splitlines() if ln.strip()][:2]
+    if any(marker in ln.lower() for ln in lines for marker in _INFRA_MARKERS):
+        return " ".join(lines)[:300]
+    return None
 
 
 def _tail(path: Path) -> str:
@@ -87,6 +116,8 @@ def run_container(
             timed_out = True
             subprocess.run(["docker", "kill", name], capture_output=True, check=False)
             exit_code = proc.wait()
+    if not timed_out and exit_code != 0 and (failure := _docker_failure(stderr_path)):
+        raise DockerError(failure)
     return ContainerResult(
         exit_code=exit_code,
         timed_out=timed_out,

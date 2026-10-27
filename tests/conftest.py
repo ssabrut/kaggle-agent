@@ -6,6 +6,8 @@ import pytest
 
 from kagent.config import CompetitionConfig, Settings
 from kagent.docker import docker_available
+from kagent.folds import make_folds
+from kagent.integrity.hashing import is_regular_file
 from kagent.workspace import Workspace
 
 
@@ -36,7 +38,9 @@ def ws(settings) -> Workspace:
         workspace.public / "sample_submission.csv", index=False
     )
     test[["id", "target"]].to_csv(workspace.private / "labels.csv", index=False)
-    workspace.save_config(CompetitionConfig(slug="toy", metric="auc"))
+    config = CompetitionConfig(slug="toy", metric="auc")
+    workspace.save_config(config)
+    make_folds(workspace, config)
     return workspace
 
 
@@ -61,7 +65,15 @@ def fake_sandbox(monkeypatch):
 
         def grade_submission(ws, config, run_dir, settings):
             path = run_dir / "out" / "submission.csv"
-            return grade(ws.public, ws.private, path, config.metric, config.id_column)
+            oof = run_dir / "out" / "oof.csv"
+            return grade(
+                ws.public,
+                ws.private,
+                path,
+                config.metric,
+                config.id_column,
+                oof if is_regular_file(oof) else None,
+            )
 
         monkeypatch.setattr(runner, "execute", execute)
         monkeypatch.setattr(grading, "grade_submission", grade_submission)
@@ -72,6 +84,13 @@ def fake_sandbox(monkeypatch):
 def write_perfect_submission(ws, run_dir):
     labels = pd.read_csv(ws.private / "labels.csv")
     labels.astype({"target": float}).to_csv(run_dir / "out" / "submission.csv", index=False)
+
+
+def write_oof(ws, run_dir, perfect: bool = True):
+    """Out-of-fold file: true labels (cv 1.0) or a constant (cv 0.5)."""
+    train = pd.read_csv(ws.public / "train.csv")[["id", "target"]]
+    train["target"] = train["target"].astype(float) if perfect else 0.5
+    train.to_csv(run_dir / "out" / "oof.csv", index=False)
 
 
 def _images_present(settings: Settings) -> bool:

@@ -23,6 +23,20 @@ class Settings(BaseSettings):
     grader_timeout_s: int = 120
     grader_memory: str = "2g"
 
+    # OpenAI-compatible servers (mlx_lm.server), one per role.
+    planner_base_url: str = "http://jupyter-01.aml1.id.iosda.org:11000/v1"
+    coder_base_url: str = "http://jupyter-01.aml1.id.iosda.org:10000/v1"
+    planner_model: str = "mlx-community/Qwen3.8-Flash-Next-4bit"
+    coder_model: str = "mlx-community/Qwen3-Coder-Next-4bit"
+    llm_timeout_s: float = 900
+    llm_max_tokens: int = 8192
+
+    @field_validator("planner_base_url", "coder_base_url")
+    @classmethod
+    def _base_url(cls, value: str) -> str:
+        """Accept either the base URL or the full .../chat/completions URL."""
+        return value.rstrip("/").removesuffix("/chat/completions")
+
 
 class CompetitionConfig(BaseModel):
     """Per-competition settings, stored as config.json in the workspace."""

@@ -1,7 +1,8 @@
 """Grader entry point. Runs in its own container with the private labels mounted.
 
     python -m grader.main --public /data/public --private /data/private \
-        --submission /submission/submission.csv --metric auc --id-column id
+        --submission /submission/submission.csv --metric auc --id-column id \
+        [--oof /submission/oof.csv]
 
 Prints one JSON line (GradeResult) on stdout. Imports only siblings, so the same
 package works on the host (as kagent.grader) and in the image (as grader).
@@ -14,13 +15,19 @@ from pathlib import Path
 
 import pandas as pd
 
+from .cv import score_oof
 from .metrics import METRICS
 from .result import GradeResult
 from .validate import validate_submission
 
 
 def grade(
-    public: Path, private: Path, submission: Path, metric: str, id_column: str
+    public: Path,
+    private: Path,
+    submission: Path,
+    metric: str,
+    id_column: str,
+    oof: Path | None = None,
 ) -> GradeResult:
     if metric not in METRICS:
         return GradeResult(valid=False, errors=[f"unknown metric '{metric}'"])
@@ -34,28 +41,31 @@ def grade(
     if errors:
         return GradeResult(valid=False, errors=errors, metric=metric)
 
-    labels_path = private / "labels.csv"
-    if not labels_path.exists():
-        return GradeResult(valid=True, metric=metric)
-
+    result = GradeResult(valid=True, metric=metric)
     target_cols = [c for c in sample.columns if c != id_column]
     if len(target_cols) != 1:
-        return GradeResult(
-            valid=True, errors=["scoring supports one target column only"], metric=metric
-        )
+        result.errors.append("scoring supports one target column only")
+        return result
     target = target_cols[0]
 
-    labels = pd.read_csv(labels_path)
-    merged = labels[[id_column, target]].merge(
-        sub[[id_column, target]], on=id_column, suffixes=("_true", "_pred")
-    )
-    if len(merged) != len(labels):
-        return GradeResult(valid=True, errors=["labels and submission ids differ"], metric=metric)
+    if oof is not None:
+        result.cv_score, result.cv_std, result.cv_errors = score_oof(
+            public, oof, metric, id_column, target
+        )
 
-    score = METRICS[metric].fn(
-        merged[f"{target}_true"].to_numpy(), merged[f"{target}_pred"].to_numpy()
-    )
-    return GradeResult(valid=True, score=score, metric=metric)
+    labels_path = private / "labels.csv"
+    if labels_path.exists():
+        labels = pd.read_csv(labels_path)
+        merged = labels[[id_column, target]].merge(
+            sub[[id_column, target]], on=id_column, suffixes=("_true", "_pred")
+        )
+        if len(merged) != len(labels):
+            result.errors.append("labels and submission ids differ")
+        else:
+            result.score = METRICS[metric].fn(
+                merged[f"{target}_true"].to_numpy(), merged[f"{target}_pred"].to_numpy()
+            )
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -63,12 +73,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--public", type=Path, required=True)
     parser.add_argument("--private", type=Path, required=True)
     parser.add_argument("--submission", type=Path, required=True)
+    parser.add_argument("--oof", type=Path, default=None)
     parser.add_argument("--metric", required=True)
     parser.add_argument("--id-column", required=True)
     args = parser.parse_args(argv)
 
     try:
-        result = grade(args.public, args.private, args.submission, args.metric, args.id_column)
+        result = grade(
+            args.public, args.private, args.submission, args.metric, args.id_column, args.oof
+        )
     except Exception as exc:  # noqa: BLE001  grader must always emit a result
         result = GradeResult(valid=False, errors=[f"grader error: {exc}"], metric=args.metric)
     print(json.dumps(asdict(result)))

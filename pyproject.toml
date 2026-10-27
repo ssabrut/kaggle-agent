@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Autonomous Kaggle agent: tree search over solution scripts with an isolated grader"
 requires-python = ">=3.11"
 dependencies = [
+    "httpx>=0.28.1",
     "kaggle>=1.6",
     "pandas>=2.2",
     "pydantic>=2.7",
