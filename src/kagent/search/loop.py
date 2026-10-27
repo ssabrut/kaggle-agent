@@ -8,9 +8,10 @@ from pathlib import Path
 from kagent import harness
 from kagent.config import CompetitionConfig, Settings
 from kagent.deps.gate import DepGate, denial_message
-from kagent.deps.lockfile import sandbox_versions
+from kagent.deps.lockfile import normalize, sandbox_versions
 from kagent.grader import metrics
 from kagent.llm.client import ChatClient
+from kagent.search.blocklist import build_blocklist
 from kagent.search.operators import Context, Operator, OperatorError, summarize
 from kagent.search.policies import SearchPolicy
 from kagent.search.tree import Node, SolutionTree, Status
@@ -207,6 +208,7 @@ def run_search(
 
         action = policy.select(tree)
         parent = action.parent
+        libraries = sandbox_versions(settings.docker_dir)
         ctx = Context(
             description=description,
             eda=eda,
@@ -217,10 +219,15 @@ def run_search(
             tree=tree,
             step_timeout_s=step_timeout,
             remaining_s=remaining,
-            libraries=sandbox_versions(settings.docker_dir),
+            libraries=libraries,
             sandbox_cpus=settings.sandbox_cpus,
             sandbox_memory=settings.sandbox_memory,
             error_log=parent.error if action.operator == "debug" and parent else "",
+            blocklist=build_blocklist(
+                tree,
+                {normalize(name) for name in libraries},
+                skip_children_of=parent.id if parent and action.operator == "improve" else None,
+            ),
         )
 
         try:

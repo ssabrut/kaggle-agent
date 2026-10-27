@@ -280,7 +280,9 @@ def load(settings) -> CompetitionConfig:
     )
 
 
-def test_fetch_page_supplies_the_metric_description_and_saved_pages(settings, data_dir, monkeypatch):
+def test_fetch_page_supplies_the_metric_description_and_saved_pages(
+    settings, data_dir, monkeypatch
+):
     fake_fetch(monkeypatch)
     result = init(settings, data_dir, "--fetch-page")
 

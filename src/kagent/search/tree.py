@@ -90,6 +90,24 @@ class SolutionTree:
             return None
         return max(ok, key=lambda n: self.rank_value(n, robust))
 
+    def incumbent(self, noise_k: float = 0.0) -> Node | None:
+        """The node the search builds on: the best one, ignoring gains that are only noise.
+
+        Nodes are visited in creation order. A node replaces the incumbent only when it beats it
+        by more than `noise_k` times the larger of the two fold spreads (spec 13.2). Comparing
+        with the incumbent, not the previous node, lets several small gains add up to a real one.
+        With noise_k = 0 this is the plain best node, earliest first on a tie.
+        """
+        incumbent: Node | None = None
+        for node in self.ok_nodes():
+            if incumbent is None:
+                incumbent = node
+                continue
+            floor = noise_k * max(node.cv_std or 0.0, incumbent.cv_std or 0.0)
+            if self.rank_value(node) - self.rank_value(incumbent) > floor:
+                incumbent = node
+        return incumbent
+
     def rank_value(self, node: Node, robust: bool = False) -> float:
         """Larger is better regardless of metric direction."""
         assert node.cv_score is not None

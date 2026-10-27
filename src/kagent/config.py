@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     grader_timeout_s: int = 120
     grader_memory: str = "2g"
 
+    # Search (spec section 13): a node is promoted only if it beats the incumbent by more than
+    # this many fold std devs, since smaller gains are validation noise. Tune per task.
+    promotion_noise_k: float = 0.5
+
     # Dependency gate (spec section 11): the agent requests packages, a human approves them.
     docker_dir: Path = REPO_ROOT / "docker"
     dep_cooldown: str = "7 days"  # newest release the resolver may pick

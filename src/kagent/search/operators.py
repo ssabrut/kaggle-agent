@@ -36,6 +36,7 @@ class Context:
     sandbox_cpus: float = 4
     sandbox_memory: str = "8g"
     error_log: str = ""  # failure output of the node being debugged
+    blocklist: list[str] = field(default_factory=list)  # approaches that failed or did not help
 
     def contract(self) -> str:
         return prompts.contract(
@@ -125,6 +126,7 @@ class DraftOperator:
                 first=not roots,
                 remaining_min=ctx.remaining_min,
                 libraries=ctx.libraries,
+                blocklist=ctx.blocklist,
             )
         )
         return _write_code(
@@ -152,6 +154,7 @@ class ImproveOperator:
                 tried=_tried(ctx, node),
                 remaining_min=ctx.remaining_min,
                 libraries=ctx.libraries,
+                blocklist=ctx.blocklist,
             )
         )
         return _write_code(

@@ -100,7 +100,9 @@ def init(
     competition: Competition,
     metric: Annotated[
         str | None,
-        typer.Option(help=f"One of: {', '.join(metrics.available())}. Needed unless --fetch-page finds it."),
+        typer.Option(
+            help=f"One of: {', '.join(metrics.available())}. Needed unless --fetch-page finds it."
+        ),
     ] = None,
     id_column: Annotated[
         str | None, typer.Option(help="Defaults to the first column of sample_submission.csv.")
@@ -206,6 +208,14 @@ def search(
     max_nodes: Annotated[int | None, typer.Option(help="Stop after this many new nodes.")] = None,
     num_drafts: Annotated[int, typer.Option(help="Independent drafts before improving.")] = 3,
     max_debug: Annotated[int, typer.Option(help="Debug attempts before a node is dead.")] = 3,
+    noise_k: Annotated[
+        float | None,
+        typer.Option(
+            min=0.0,
+            help="A node must beat the best by this many fold std devs to be improved next "
+            "(default: KAGENT_PROMOTION_NOISE_K, 0.5).",
+        ),
+    ] = None,
 ) -> None:
     """Run the draft/debug/improve loop. Resumes an existing tree in the workspace."""
     if policy != "greedy":
@@ -261,7 +271,10 @@ def search(
             config,
             settings,
             tree,
-            GreedyPolicy(num_drafts=num_drafts),
+            GreedyPolicy(
+                num_drafts=num_drafts,
+                noise_k=settings.promotion_noise_k if noise_k is None else noise_k,
+            ),
             operators,
             planner,
             description=description,

@@ -16,7 +16,7 @@ def seed(ws, **precheck):
             reason="ModuleNotFoundError",
             node_id="n002",
             precheck=PreCheck(exists_on_index=True, **precheck),
-        )  # fmt: skip
+        )
     )
     return store
 

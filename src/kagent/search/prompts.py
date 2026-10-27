@@ -1,5 +1,7 @@
 """Prompt builders. Each returns a chat message list; none of them include full history."""
 
+from collections.abc import Sequence
+
 from kagent.llm.client import Message
 
 SYSTEM_PLANNER = (
@@ -85,6 +87,17 @@ def _tried_block(items: list[tuple[str, str]], empty: str) -> str:
     return "\n".join(f"- {name}: {text}" for name, text in items)
 
 
+def _blocklist_block(blocklist: Sequence[str]) -> str:
+    """Empty when there is nothing to avoid, so a clean search sees no extra section."""
+    if not blocklist:
+        return ""
+    items = "\n".join(f"- {entry}" for entry in blocklist)
+    return (
+        "\nFailed or did not help earlier in the search (do not repeat these or close "
+        f"variants):\n{items}\n"
+    )
+
+
 def plan_draft(
     *,
     description: str,
@@ -95,6 +108,7 @@ def plan_draft(
     first: bool,
     remaining_min: float,
     libraries: dict[str, str],
+    blocklist: Sequence[str] = (),
 ) -> list[Message]:
     style = (
         "This is the first draft. Plan a simple, robust baseline that is very likely to run "
@@ -113,7 +127,7 @@ Metric: {metric} ({direction(higher_is_better)}). About {remaining_min:.0f} minu
 
 Approaches already tried:
 {_tried_block(tried, "(none yet)")}
-
+{_blocklist_block(blocklist)}
 {style}
 Write a short plan of 3-6 bullets: preprocessing, features, model, and how to use the folds. No code."""
     return [{"role": "system", "content": SYSTEM_PLANNER}, {"role": "user", "content": user}]
@@ -141,6 +155,7 @@ def plan_improvement(
     tried: list[tuple[str, str]],
     remaining_min: float,
     libraries: dict[str, str],
+    blocklist: Sequence[str] = (),
 ) -> list[Message]:
     spread = f" +/- {cv_std:.5f}" if cv_std is not None else ""
     user = f"""Metric: {metric} ({direction(higher_is_better)}). About {remaining_min:.0f} minutes of search time remain.
@@ -154,7 +169,7 @@ What happened when it ran: {summary or "(no summary)"}
 
 Changes already tried from this solution, with results:
 {_tried_block(tried, "(none yet)")}
-
+{_blocklist_block(blocklist)}
 Propose exactly ONE specific change likely to improve the cross-validated {metric}, such as a
 new feature, a hyperparameter change, a different model, or a blend. Do not repeat a change
 that was already tried. Reply with 2-4 sentences and no code."""

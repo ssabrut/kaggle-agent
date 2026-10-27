@@ -201,6 +201,30 @@ def test_contract_follows_the_libraries_it_is_given(ctx):
     assert "numpy 2.4.6, catboost 1.2.8" in ctx.contract()
 
 
+def test_blocklist_reaches_the_draft_and_improve_prompts(ctx, tree, tmp_path):
+    ctx.blocklist = ["Added TF-IDF -> cv 0.79000 against 0.80000 before: no gain"]
+    planner = FakeChat(["- plan"])
+    DraftOperator(planner, FakeChat([code_block("print(1)")])).apply(None, ctx)
+    parent = _node(tree, tmp_path)
+    improver = FakeChat(["idea"])
+    ImproveOperator(improver, FakeChat([code_block("print(2)")])).apply(parent, ctx)
+
+    for text in (planner.user_text(0), improver.user_text(0)):
+        assert "Failed or did not help earlier in the search" in text
+        assert "- Added TF-IDF -> cv 0.79000 against 0.80000 before: no gain" in text
+
+
+def test_prompts_have_no_blocklist_section_when_there_is_nothing_to_avoid(ctx, tree, tmp_path):
+    planner = FakeChat(["- plan"])
+    DraftOperator(planner, FakeChat([code_block("print(1)")])).apply(None, ctx)
+    parent = _node(tree, tmp_path)
+    improver = FakeChat(["idea"])
+    ImproveOperator(improver, FakeChat([code_block("print(2)")])).apply(parent, ctx)
+
+    for text in (planner.user_text(0), improver.user_text(0)):
+        assert "Failed or did not help" not in text
+
+
 def test_planner_prompts_name_the_installed_libraries_and_the_cost_of_others(ctx, tree, tmp_path):
     planner = FakeChat(["- plan"])
     DraftOperator(planner, FakeChat([code_block("print(1)")])).apply(None, ctx)

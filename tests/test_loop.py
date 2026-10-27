@@ -105,6 +105,17 @@ def test_node_dies_after_max_debug_attempts_and_search_restarts(ws, settings, pa
     assert tree.nodes[3].operator == "draft"
 
 
+def test_next_draft_is_told_about_the_branch_that_died(ws, settings, parts):
+    _search(
+        ws, settings, parts, [marker("# CRASH")] * 4,
+        policy=GreedyPolicy(num_drafts=1, debug_prob=1.0), max_nodes=4, max_debug=2,
+    )  # fmt: skip
+    planner = parts[1]
+
+    assert "failed with KeyError: 'foo'" in planner.user_text(1)  # the draft after the dead node
+    assert "Failed or did not help" not in planner.user_text(0)  # nothing had failed yet
+
+
 def test_missing_oof_is_a_failure_not_a_score(ws, settings, parts):
     tree, _, _ = _search(ws, settings, parts, [marker("# NOCV")], max_nodes=1)
     node = tree.nodes[0]

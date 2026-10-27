@@ -20,9 +20,12 @@ class SearchPolicy(Protocol):
 class GreedyPolicy:
     """AIDE-style: build a few diverse drafts, then fix failures or improve the best node."""
 
-    def __init__(self, num_drafts: int = 3, debug_prob: float = 0.5, seed: int = 0) -> None:
+    def __init__(
+        self, num_drafts: int = 3, debug_prob: float = 0.5, seed: int = 0, noise_k: float = 0.0
+    ) -> None:
         self.num_drafts = num_drafts
         self.debug_prob = debug_prob
+        self.noise_k = noise_k  # a node must beat the incumbent by this many fold std devs
         self._rng = random.Random(seed)
 
     def select(self, tree: SolutionTree) -> Action:
@@ -30,7 +33,7 @@ class GreedyPolicy:
             return Action("draft", None)
 
         buggy = tree.buggy_leaves()
-        best = tree.best()
+        best = tree.incumbent(self.noise_k)
         if buggy and (best is None or self._rng.random() < self.debug_prob):
             return Action("debug", self._rng.choice(buggy))
         if best is not None:

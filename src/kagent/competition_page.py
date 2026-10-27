@@ -52,7 +52,8 @@ class FetchedPages:
 class PageInfo:
     description: str  # Overview text up to the FAQ, Evaluation section included
     evaluation: str
-    kind: str | None = None  # for example "Kaggle · Getting Started Prediction Competition · Ongoing"
+    # for example "Kaggle · Getting Started Prediction Competition · Ongoing"
+    kind: str | None = None
     tags: list[str] = field(default_factory=list)
     prizes: list[str] = field(default_factory=list)
     metric: str | None = None  # our registry key, when a tag maps onto one

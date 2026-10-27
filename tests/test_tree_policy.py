@@ -73,6 +73,59 @@ def test_robust_best_penalizes_spread_for_lower_is_better(tmp_path):
     assert tree.best(robust=True).id == "n002"
 
 
+def test_incumbent_without_noise_floor_is_the_plain_best(tmp_path):
+    tree = _tree(tmp_path)
+    assert tree.incumbent() is None
+    _add(tree, "buggy")
+    assert tree.incumbent(0.5) is None
+    for cv in (0.80, 0.8001, 0.79, 0.8001):
+        _add(tree, cv=cv, std=0.01)
+    assert tree.incumbent().id == tree.best().id == "n003"  # first of the tied 0.8001 nodes
+
+
+def test_gain_inside_the_noise_floor_does_not_promote(tmp_path):
+    tree = _tree(tmp_path)
+    _add(tree, cv=0.800, std=0.01)
+    _add(tree, cv=0.802, std=0.01)  # +0.002 against a floor of 0.5 * 0.01 = 0.005
+    assert tree.best().id == "n002"
+    assert tree.incumbent(0.5).id == "n001"
+
+    _add(tree, cv=0.810, std=0.01)  # +0.010 clears the floor
+    assert tree.incumbent(0.5).id == "n003"
+
+
+def test_small_gains_add_up_against_the_incumbent(tmp_path):
+    tree = _tree(tmp_path)
+    for cv in (0.800, 0.803, 0.806):  # each step is below 0.005, the total is not
+        _add(tree, cv=cv, std=0.01)
+    assert tree.incumbent(0.5).id == "n003"
+
+
+def test_noise_floor_uses_the_larger_spread_of_the_pair(tmp_path):
+    tree = _tree(tmp_path)
+    _add(tree, cv=0.800, std=0.001)
+    _add(tree, cv=0.805, std=0.04)  # floor is 0.5 * 0.04 = 0.02, not 0.5 * 0.001
+    assert tree.incumbent(0.5).id == "n001"
+
+
+def test_noise_floor_when_lower_is_better(tmp_path):
+    tree = _tree(tmp_path, higher=False)
+    _add(tree, cv=0.500, std=0.02)
+    _add(tree, cv=0.495, std=0.02)  # 0.005 better against a floor of 0.01
+    assert tree.incumbent(0.5).id == "n001"
+    _add(tree, cv=0.480, std=0.02)
+    assert tree.incumbent(0.5).id == "n003"
+    _add(tree, cv=0.520, std=0.02)  # worse nodes never take over
+    assert tree.incumbent(0.5).id == "n003"
+
+
+def test_missing_spread_means_no_noise_floor(tmp_path):
+    tree = _tree(tmp_path)
+    _add(tree, cv=0.800)
+    _add(tree, cv=0.801)
+    assert tree.incumbent(5.0).id == "n002"
+
+
 def test_buggy_leaves_exclude_nodes_already_debugged(tmp_path):
     tree = _tree(tmp_path)
     broken = _add(tree, "buggy")
@@ -96,6 +149,18 @@ def test_policy_improves_best_when_nothing_is_broken(tmp_path):
     _add(tree, cv=0.8)
     action = GreedyPolicy(num_drafts=2).select(tree)
     assert (action.operator, action.parent.id) == ("improve", "n002")
+
+
+def test_policy_improves_the_incumbent_not_a_noise_level_winner(tmp_path):
+    tree = _tree(tmp_path)
+    _add(tree, cv=0.800, std=0.01)
+    _add(tree, cv=0.802, std=0.01)
+
+    plain = GreedyPolicy(num_drafts=2).select(tree)
+    guarded = GreedyPolicy(num_drafts=2, noise_k=0.5).select(tree)
+
+    assert plain.parent.id == "n002"
+    assert guarded.parent.id == "n001"
 
 
 def test_policy_debugs_when_probability_says_so(tmp_path):
