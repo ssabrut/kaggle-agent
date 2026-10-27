@@ -1,0 +1,6 @@
+# Top-level packages for the sandbox. Edit through `kagent deps approve`, not by hand:
+# every addition needs a human decision (spec section 11).
+lightgbm
+numpy
+pandas>=2.2,<3
+scikit-learn

@@ -1,0 +1,4 @@
+# The grader reads CSVs and computes metrics. Same data stack as the sandbox.
+numpy
+pandas>=2.2,<3
+scikit-learn

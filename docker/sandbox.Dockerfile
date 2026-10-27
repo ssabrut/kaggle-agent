@@ -1,12 +1,18 @@
 # Runs agent-written scripts. No grader code, no private labels, no secrets baked in.
+# Build with `kagent build-images` (it passes LOCK_SHA256 so a stale image can be detected).
 FROM python:3.11-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Keep in sync with SANDBOX_VERSIONS in src/kagent/search/prompts.py (a test checks this).
-# The prompt tells the model these versions so it avoids APIs removed since its training data.
-RUN pip install --no-cache-dir numpy==2.4.6 pandas==3.1.0 scikit-learn==1.9.1 lightgbm==4.7.0
+# Every package, direct or transitive, is pinned with hashes in sandbox.lock.txt. New packages
+# arrive only through `kagent deps approve`, which recompiles that file.
+COPY docker/sandbox.lock.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.txt \
+    && rm /tmp/requirements.txt
+
+ARG LOCK_SHA256=unknown
+LABEL kagent.lock-sha256=$LOCK_SHA256
 
 WORKDIR /work

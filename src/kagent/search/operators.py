@@ -6,7 +6,7 @@ the coder writes the script. Debug skips the planner.
 
 import ast
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from kagent.llm.client import ChatClient, Message
@@ -32,6 +32,7 @@ class Context:
     tree: SolutionTree
     step_timeout_s: int
     remaining_s: float
+    libraries: dict[str, str] = field(default_factory=dict)  # installed top-level packages
     sandbox_cpus: float = 4
     sandbox_memory: str = "8g"
     error_log: str = ""  # failure output of the node being debugged
@@ -44,6 +45,7 @@ class Context:
             step_timeout_s=self.step_timeout_s,
             cpus=self.sandbox_cpus,
             memory=self.sandbox_memory,
+            libraries=self.libraries,
         )
 
     @property
@@ -122,6 +124,7 @@ class DraftOperator:
                 tried=tried,
                 first=not roots,
                 remaining_min=ctx.remaining_min,
+                libraries=ctx.libraries,
             )
         )
         return _write_code(
@@ -148,6 +151,7 @@ class ImproveOperator:
                 summary=node.summary,
                 tried=_tried(ctx, node),
                 remaining_min=ctx.remaining_min,
+                libraries=ctx.libraries,
             )
         )
         return _write_code(

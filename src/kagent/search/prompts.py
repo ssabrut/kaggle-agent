@@ -37,21 +37,29 @@ def direction(higher_is_better: bool) -> str:
     return "higher is better" if higher_is_better else "lower is better"
 
 
-# Must match the pins in docker/sandbox.Dockerfile; tests/test_operators.py checks it.
-SANDBOX_VERSIONS = {
-    "numpy": "2.4.6",
-    "pandas": "3.1.0",
-    "scikit-learn": "1.9.1",
-    "lightgbm": "4.7.0",
-}
+def available_libraries(libraries: dict[str, str]) -> str:
+    """Tell the planner what is installed and what leaving that set costs."""
+    names = ", ".join(libraries)
+    return (
+        f"The script can import the Python standard library plus {names}. Prefer these. Any other "
+        "package makes the script fail until a human approves an install request, which can take "
+        "hours, so import something else only when it is clearly worth the wait."
+    )
 
 
 def contract(
-    *, metric: str, id_column: str, target: str, step_timeout_s: int, cpus: float, memory: str
+    *,
+    metric: str,
+    id_column: str,
+    target: str,
+    step_timeout_s: int,
+    cpus: float,
+    memory: str,
+    libraries: dict[str, str],
 ) -> str:
-    libs = ", ".join(f"{name} {version}" for name, version in SANDBOX_VERSIONS.items())
+    libs = ", ".join(f"{name} {version}" for name, version in libraries.items())
     return f"""Environment contract (the script is run exactly as written, once):
-- Python 3.11 with {libs}. No internet, no pip install.
+- Python 3.11 with {libs} (plus their dependencies). No internet, no pip install.
   These versions are newer than your training data: do not use APIs removed in recent releases
   (for example CalibratedClassifierCV(cv="prefit"), use FrozenEstimator; DataFrame.append).
 - Read /data/train.csv, /data/test.csv, /data/sample_submission.csv and /data/folds.csv
@@ -86,6 +94,7 @@ def plan_draft(
     tried: list[tuple[str, str]],
     first: bool,
     remaining_min: float,
+    libraries: dict[str, str],
 ) -> list[Message]:
     style = (
         "This is the first draft. Plan a simple, robust baseline that is very likely to run "
@@ -100,6 +109,7 @@ Data profile:
 {clip(eda, CLIP_TEXT)}
 
 Metric: {metric} ({direction(higher_is_better)}). About {remaining_min:.0f} minutes of search time remain.
+{available_libraries(libraries)}
 
 Approaches already tried:
 {_tried_block(tried, "(none yet)")}
@@ -130,9 +140,11 @@ def plan_improvement(
     summary: str,
     tried: list[tuple[str, str]],
     remaining_min: float,
+    libraries: dict[str, str],
 ) -> list[Message]:
     spread = f" +/- {cv_std:.5f}" if cv_std is not None else ""
     user = f"""Metric: {metric} ({direction(higher_is_better)}). About {remaining_min:.0f} minutes of search time remain.
+{available_libraries(libraries)}
 
 Current best solution, cross-validated {metric} = {cv_score:.5f}{spread}:
 ```python

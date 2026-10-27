@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-Status = Literal["ok", "buggy", "dead"]
+Status = Literal["ok", "buggy", "dead", "blocked"]  # blocked: waiting on a dependency request
 
 ROBUST_STD_WEIGHT = 0.5  # [S] penalty for fold-to-fold spread when selecting by robust CV
 
@@ -28,6 +28,7 @@ class Node:
     error: str = ""  # short failure description for buggy/dead nodes
     run_id: str | None = None
     debug_depth: int = 0  # consecutive debug ancestors, including this node
+    dep_request: str | None = None  # the dependency request a blocked node waits on
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
@@ -75,6 +76,9 @@ class SolutionTree:
 
     def ok_nodes(self) -> list[Node]:
         return [n for n in self.nodes if n.status == "ok" and n.cv_score is not None]
+
+    def blocked_nodes(self) -> list[Node]:
+        return [n for n in self.nodes if n.status == "blocked"]
 
     def buggy_leaves(self) -> list[Node]:
         """Failed nodes nobody has tried to fix yet."""

@@ -54,6 +54,18 @@ class Workspace:
     def selected_path(self) -> Path:
         return self.root / "selected.json"
 
+    @property
+    def page_dir(self) -> Path:
+        """What `init --fetch-page` read from the competition website."""
+        return self.root / "page"
+
+    def infer_id_column(self) -> str:
+        """The first column of sample_submission.csv, which Kaggle uses for the row id."""
+        sample = self.public / "sample_submission.csv"
+        if not sample.exists():
+            raise FileNotFoundError(f"{sample} not found; pass --id-column")
+        return str(pd.read_csv(sample, nrows=0).columns[0])
+
     def run_dir(self, run_id: str) -> Path:
         return self.runs / run_id
 

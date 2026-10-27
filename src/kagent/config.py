@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     grader_timeout_s: int = 120
     grader_memory: str = "2g"
 
+    # Dependency gate (spec section 11): the agent requests packages, a human approves them.
+    docker_dir: Path = REPO_ROOT / "docker"
+    dep_cooldown: str = "7 days"  # newest release the resolver may pick
+    dep_request_timeout_s: int = 6 * 3600  # a node waiting longer than this is marked dead
+    max_dep_requests: int = 5  # per search session
+
     # OpenAI-compatible servers (mlx_lm.server), one per role.
     planner_base_url: str = "http://jupyter-01.aml1.id.iosda.org:11000/v1"
     coder_base_url: str = "http://jupyter-01.aml1.id.iosda.org:10000/v1"

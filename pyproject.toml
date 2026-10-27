@@ -6,7 +6,8 @@ requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.28.1",
     "kaggle>=1.6",
-    "pandas>=2.2",
+    "packaging>=24",
+    "pandas>=2.2,<3",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "scikit-learn>=1.5",
@@ -17,7 +18,11 @@ dependencies = [
 kagent = "kagent.cli:app"
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.5"]
+dev = [
+    "playwright>=1.64.0",
+    "pytest>=8",
+    "ruff>=0.5",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -29,6 +34,10 @@ packages = ["src/kagent"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["docker: needs a running Docker daemon and built images"]
+
+[tool.uv]
+# Spec section 11.3: ignore releases younger than a week, so yanks and disclosures land first.
+exclude-newer = "7 days"
 
 [tool.ruff]
 line-length = 100

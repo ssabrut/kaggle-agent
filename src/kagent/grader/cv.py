@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from .metrics import METRICS
-from .validate import MAX_ERRORS
+from .validate import MAX_ERRORS, kind_mismatch
 
 
 def score_oof(
@@ -39,8 +39,8 @@ def score_oof(
         errors.append(f"oof '{id_column}' values differ from train.csv")
     if oof[target].isna().any():
         errors.append(f"missing values in oof '{target}'")
-    if not pd.api.types.is_numeric_dtype(oof[target]):
-        errors.append(f"oof '{target}' must be numeric")
+    if expected := kind_mismatch(train[target], oof[target]):
+        errors.append(f"oof '{target}' must be {expected}, like the train target")
     if errors:
         return None, None, errors[:MAX_ERRORS]
 

@@ -32,6 +32,12 @@ def ctx(tree):
         tree=tree,
         step_timeout_s=600,
         remaining_s=3600,
+        libraries={
+            "numpy": "2.4.6",
+            "pandas": "2.3.3",
+            "scikit-learn": "1.9.1",
+            "lightgbm": "4.7.0",
+        },
     )
 
 
@@ -184,14 +190,24 @@ def test_long_code_is_clipped_in_prompts(ctx, tree, tmp_path):
     assert isinstance(Path(parent.code_path), Path)
 
 
-def test_contract_library_versions_match_the_sandbox_image():
-    from kagent.config import REPO_ROOT
-    from kagent.search.prompts import SANDBOX_VERSIONS
-
-    dockerfile = (REPO_ROOT / "docker" / "sandbox.Dockerfile").read_text()
-    for name, version in SANDBOX_VERSIONS.items():
-        assert f"{name}=={version}" in dockerfile
+def test_contract_states_the_installed_library_versions(ctx):
+    contract = ctx.contract()
+    assert "numpy 2.4.6, pandas 2.3.3, scikit-learn 1.9.1, lightgbm 4.7.0" in contract
+    assert "FrozenEstimator" in contract
 
 
-def test_contract_states_library_versions(ctx):
-    assert "scikit-learn 1.9.1" in ctx.contract() and "FrozenEstimator" in ctx.contract()
+def test_contract_follows_the_libraries_it_is_given(ctx):
+    ctx.libraries = {"numpy": "2.4.6", "catboost": "1.2.8"}
+    assert "numpy 2.4.6, catboost 1.2.8" in ctx.contract()
+
+
+def test_planner_prompts_name_the_installed_libraries_and_the_cost_of_others(ctx, tree, tmp_path):
+    planner = FakeChat(["- plan"])
+    DraftOperator(planner, FakeChat([code_block("print(1)")])).apply(None, ctx)
+    parent = _node(tree, tmp_path)
+    improver = FakeChat(["idea"])
+    ImproveOperator(improver, FakeChat([code_block("print(2)")])).apply(parent, ctx)
+
+    for text in (planner.user_text(0), improver.user_text(0)):
+        assert "standard library plus numpy, pandas, scikit-learn, lightgbm" in text
+        assert "until a human approves an install request" in text

@@ -8,11 +8,22 @@ from typing import Annotated
 import typer
 
 from kagent import harness
-from kagent.config import REPO_ROOT, CompetitionConfig, Settings
+from kagent.competition_page import (
+    PageFetchError,
+    PageInfo,
+    fetch_pages,
+    parse_overview,
+    save_pages,
+)
+from kagent.config import CompetitionConfig, Settings
+from kagent.deps.gate import DepGate
+from kagent.deps.install import InstallError, approve_request, deny_request
+from kagent.deps.store import DependencyStore
 from kagent.docker import DockerError, docker_available
 from kagent.eda import write_profile
 from kagent.folds import make_folds
 from kagent.grader import metrics
+from kagent.images import build_image, specs, stale_images
 from kagent.llm.client import ChatClient, LLMError
 from kagent.search.loop import IntegrityAbort, OperatorFailures, open_tree, run_search
 from kagent.search.operators import DebugOperator, DraftOperator, ImproveOperator
@@ -28,6 +39,10 @@ Competition = Annotated[str, typer.Option("--competition", "-c", help="Kaggle co
 
 def _workspace(slug: str) -> Workspace:
     return Workspace.for_slug(Settings(), slug)
+
+
+def _deps_dir(ws: Workspace) -> Path:
+    return ws.root / "deps"
 
 
 def _copy_contents(src: Path, dst: Path) -> None:
@@ -59,11 +74,37 @@ def _kaggle_download(slug: str, dest: Path) -> None:
                 zf.extractall(dest)
 
 
+def _read_competition_page(ws: Workspace, slug: str, headless: bool) -> PageInfo | None:
+    """Fetch and save the public pages. A failure is reported and init carries on."""
+    try:
+        fetched = fetch_pages(slug, headless=headless)
+    except PageFetchError as exc:
+        typer.echo(f"could not read the competition page: {exc}", err=True)
+        return None
+    info = parse_overview(fetched.overview_container, fetched.overview_body)
+    save_pages(ws, fetched, info)
+    typer.echo(f"page: {info.kind or 'competition kind not found'}")
+    if info.tags:
+        typer.echo(f"page tags: {', '.join(info.tags)}")
+    if info.prize_warning:
+        typer.echo(f"warning: {info.prize_warning}", err=True)
+    typer.echo(
+        f"saved {ws.page_dir}; read rules.txt before running, since some competitions "
+        "restrict automated tools"
+    )
+    return info
+
+
 @app.command()
 def init(
     competition: Competition,
-    metric: Annotated[str, typer.Option(help=f"One of: {', '.join(metrics.available())}")],
-    id_column: Annotated[str, typer.Option(help="Id column in sample_submission.csv.")] = "id",
+    metric: Annotated[
+        str | None,
+        typer.Option(help=f"One of: {', '.join(metrics.available())}. Needed unless --fetch-page finds it."),
+    ] = None,
+    id_column: Annotated[
+        str | None, typer.Option(help="Defaults to the first column of sample_submission.csv.")
+    ] = None,
     data_dir: Annotated[
         Path | None, typer.Option(help="Copy public data from here instead of downloading.")
     ] = None,
@@ -73,12 +114,17 @@ def init(
     description: Annotated[
         Path | None, typer.Option(help="Text or markdown file describing the competition.")
     ] = None,
+    fetch_page: Annotated[
+        bool,
+        typer.Option("--fetch-page", help="Read the competition's public pages (opens a browser)."),
+    ] = False,
+    headless: Annotated[
+        bool, typer.Option(help="Hide the browser window. Only the visible mode has been tried.")
+    ] = False,
 ) -> None:
     """Create the workspace, fetch data, write config and CV folds."""
-    try:
-        config = CompetitionConfig(slug=competition, metric=metric, id_column=id_column)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
+    if metric is not None and metric not in metrics.METRICS:
+        raise typer.BadParameter(f"unknown metric '{metric}', choose from {metrics.available()}")
 
     ws = _workspace(competition)
     ws.create()
@@ -88,8 +134,29 @@ def init(
         _kaggle_download(competition, ws.public)
     if private_dir:
         _copy_contents(private_dir, ws.private)
+
+    info = _read_competition_page(ws, competition, headless) if fetch_page else None
+    chosen = metric or (info.metric if info else None)
+    if chosen is None:
+        tags = f" (page tags: {', '.join(info.tags)})" if info and info.tags else ""
+        raise typer.BadParameter(
+            f"no metric given and none could be read from the page{tags}; "
+            f"pass --metric, one of {metrics.available()}"
+        )
+    if metric is None and info is not None:
+        typer.echo(f"metric from page: {chosen} (tag '{info.metric_text}')")
+
+    try:
+        config = CompetitionConfig(
+            slug=competition, metric=chosen, id_column=id_column or ws.infer_id_column()
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
     if description:
         shutil.copyfile(description, ws.description_path)
+    elif info is not None:
+        ws.description_path.write_text(info.description + "\n")
     ws.save_config(config)
     if make_folds(ws, config):
         typer.echo("wrote data/public/folds.csv (5 folds)")
@@ -107,20 +174,13 @@ def eda(competition: Competition) -> None:
 
 @app.command("build-images")
 def build_images() -> None:
-    """Build the sandbox and grader Docker images from docker/."""
+    """Build the sandbox and grader images from their hash-locked requirements."""
     settings = Settings()
     if not docker_available():
         typer.echo("docker daemon not reachable; start Docker and retry", err=True)
         raise typer.Exit(1)
-    for dockerfile, tag in (
-        ("sandbox.Dockerfile", settings.sandbox_image),
-        ("grader.Dockerfile", settings.grader_image),
-    ):
-        subprocess.run(
-            ["docker", "build", "-f", f"docker/{dockerfile}", "-t", tag, "."],
-            cwd=REPO_ROOT,
-            check=True,
-        )
+    for spec in specs(settings):
+        build_image(spec, settings)
 
 
 @app.command()
@@ -153,6 +213,13 @@ def search(
     settings = Settings()
     if not docker_available():
         typer.echo("docker daemon not reachable; start Docker and retry", err=True)
+        raise typer.Exit(2)
+    if stale := stale_images(settings):
+        typer.echo(
+            f"{' and '.join(stale)} image missing or built from an older lock; "
+            "run `kagent build-images`",
+            err=True,
+        )
         raise typer.Exit(2)
     ws = Workspace.for_slug(settings, competition)
     config = ws.load_config()
@@ -187,6 +254,7 @@ def search(
         "debug": DebugOperator(coder),
     }
     tree = open_tree(ws, config)
+    gate = DepGate(DependencyStore(_deps_dir(ws)), settings)
     try:
         run_search(
             ws,
@@ -201,6 +269,7 @@ def search(
             budget_s=budget_hours * 3600,
             max_nodes=max_nodes,
             max_debug=max_debug,
+            deps=gate,
             log=typer.echo,
         )
     except (LLMError, IntegrityAbort, OperatorFailures, DockerError) as exc:
@@ -209,6 +278,11 @@ def search(
             typer.echo("no node was recorded for that step; rerun to resume", err=True)
         raise typer.Exit(1) from exc
 
+    if pending := gate.pending():
+        typer.echo(
+            f"{len(pending)} dependency request(s) waiting for a decision: "
+            f"`kagent deps list -c {competition}`"
+        )
     best = tree.best(robust=True)
     if best:
         typer.echo(f"best so far: {best.id} cv={best.cv_score:.5f} +/- {best.cv_std or 0:.5f}")
@@ -252,3 +326,75 @@ def submit_cmd(
         typer.echo("dry run, would execute:\n  " + " ".join(result.command))
     else:
         typer.echo(result.output or "submitted")
+
+
+deps_app = typer.Typer(no_args_is_help=True, help="Review the agent's package requests.")
+app.add_typer(deps_app, name="deps")
+
+
+@deps_app.command("list")
+def deps_list(
+    competition: Competition,
+    all_: Annotated[bool, typer.Option("--all", help="Include decided requests.")] = False,
+) -> None:
+    """Show dependency requests (pending ones unless --all)."""
+    store = DependencyStore(_deps_dir(_workspace(competition)))
+    requests = store.all() if all_ else store.all("pending")
+    if not requests:
+        typer.echo("no pending dependency requests" if not all_ else "no dependency requests")
+        return
+    for r in requests:
+        flags = ", ".join(r.precheck.flags()) or "no warnings"
+        typer.echo(f"{r.id}  {r.status:<8} {r.requirement:<24} node {r.node_id}  [{flags}]")
+
+
+@deps_app.command("show")
+def deps_show(competition: Competition, request_id: Annotated[str, typer.Argument()]) -> None:
+    """Everything known about one request."""
+    try:
+        request = DependencyStore(_deps_dir(_workspace(competition))).get(request_id)
+    except KeyError as exc:
+        raise typer.BadParameter(str(exc.args[0])) from exc
+    typer.echo(request.model_dump_json(indent=2))
+
+
+@deps_app.command("approve")
+def deps_approve(
+    competition: Competition,
+    request_id: Annotated[str, typer.Argument()],
+    skip_cooldown: Annotated[
+        bool, typer.Option(help="Allow a release newer than the cooldown, for this package only.")
+    ] = False,
+) -> None:
+    """Add the package to the lock, rebuild the sandbox image, and let waiting nodes rerun."""
+    settings = Settings()
+    if not docker_available():
+        typer.echo("docker daemon not reachable; start Docker and retry", err=True)
+        raise typer.Exit(2)
+    store = DependencyStore(_deps_dir(Workspace.for_slug(settings, competition)))
+    try:
+        request = approve_request(store, request_id, settings, skip_cooldown=skip_cooldown)
+    except KeyError as exc:
+        raise typer.BadParameter(str(exc.args[0])) from exc
+    except InstallError as exc:
+        typer.echo(f"not approved: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"approved {request.package} {request.resolved_version}; sandbox image rebuilt")
+
+
+@deps_app.command("deny")
+def deps_deny(
+    competition: Competition,
+    request_id: Annotated[str, typer.Argument()],
+    reason: Annotated[str, typer.Option(help="Shown to the agent so it picks another approach.")],
+) -> None:
+    """Refuse a request. The waiting node is returned to debugging with the reason."""
+    store = DependencyStore(_deps_dir(_workspace(competition)))
+    try:
+        deny_request(store, request_id, reason)
+    except KeyError as exc:
+        raise typer.BadParameter(str(exc.args[0])) from exc
+    except InstallError as exc:
+        typer.echo(f"not denied: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"denied {request_id}")
