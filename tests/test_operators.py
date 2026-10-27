@@ -159,6 +159,33 @@ def test_debug_sends_code_and_error_but_skips_the_planner(ctx, tree, tmp_path):
     assert "df['zip']" in prompt and "KeyError: 'zip'" in prompt
 
 
+def test_debug_prompt_says_how_far_the_script_got(ctx, tree, tmp_path):
+    broken = _node(tree, tmp_path, code="df['zip']\n", status="buggy", cv_score=None)
+    ctx.error_log, ctx.stage = "KeyError: 'zip'", "features"
+    coder = FakeChat([code_block("df.get('zip')")])
+
+    DebugOperator(coder).apply(broken, ctx)
+
+    assert "How far it got: The features were built" in coder.user_text(0)
+
+
+@pytest.mark.parametrize("stage", ["", "validate", "nonsense"])
+def test_debug_prompt_has_no_progress_note_without_a_known_stage(ctx, tree, tmp_path, stage):
+    broken = _node(tree, tmp_path, status="buggy", cv_score=None)
+    ctx.stage = stage
+    coder = FakeChat([code_block("print(1)")])
+
+    DebugOperator(coder).apply(broken, ctx)
+
+    assert "How far it got" not in coder.user_text(0)
+
+
+def test_contract_asks_for_stage_lines(ctx):
+    contract = ctx.contract()
+    for name in ("load", "features", "cv", "predict"):
+        assert f"STAGE: {name}" in contract
+
+
 def test_unusable_reply_gets_one_repair_attempt(ctx):
     planner = FakeChat(["- plan"])
     coder = FakeChat(["I cannot do that", code_block("print(1)")])

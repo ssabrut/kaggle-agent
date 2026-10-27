@@ -14,6 +14,7 @@ from kagent.config import Settings
 from kagent.grader.result import GradeResult
 from kagent.integrity.hashing import find_changes, hash_file, is_regular_file, snapshot
 from kagent.sandbox import runner
+from kagent.stages import stage_reached
 from kagent.workspace import Workspace
 
 GRADER_SRC = Path(kagent.grader.__file__).parent
@@ -32,6 +33,7 @@ class RunRecord(BaseModel):
     grade: GradeResult | None = None
     integrity_changes: list[str] = []
     stderr_tail: str = ""
+    stage_reached: str = "start"  # see kagent.stages
 
 
 def new_run_id() -> str:
@@ -91,6 +93,9 @@ def run_script(ws: Workspace, script: Path, settings: Settings) -> RunRecord:
         grade=grade,
         integrity_changes=changes,
         stderr_tail=sandbox.stderr_tail,
+        stage_reached=stage_reached(
+            run_dir, graded=grade is not None and grade.valid and grade.cv_score is not None
+        ),
     )
     (run_dir / "run.json").write_text(record.model_dump_json(indent=2) + "\n")
     return record

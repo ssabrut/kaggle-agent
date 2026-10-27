@@ -36,6 +36,7 @@ class Context:
     sandbox_cpus: float = 4
     sandbox_memory: str = "8g"
     error_log: str = ""  # failure output of the node being debugged
+    stage: str = ""  # how far the node being debugged got (kagent.stages)
     blocklist: list[str] = field(default_factory=list)  # approaches that failed or did not help
 
     def contract(self) -> str:
@@ -171,7 +172,10 @@ class DebugOperator:
     def apply(self, node: Node | None, ctx: Context) -> str:
         assert node is not None
         messages = prompts.code_debug(
-            contract_text=ctx.contract(), code=node.code_path.read_text(), error=ctx.error_log
+            contract_text=ctx.contract(),
+            code=node.code_path.read_text(),
+            error=ctx.error_log,
+            stage=ctx.stage,
         )
         return _write_code(self.coder, messages)
 

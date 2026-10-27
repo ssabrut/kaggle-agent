@@ -13,14 +13,19 @@ from kagent.search.policies import GreedyPolicy
 
 
 def fake_run(ws, script, settings):
-    """Outcome comes from markers in the script: '# CV=0.8', '# CRASH', '# TAMPER', '# NOCV'."""
+    """Outcome comes from markers in the script: '# CV=0.8', '# CRASH', '# TAMPER', '# NOCV'.
+
+    '# STAGE=features' sets how far the run is reported to have got.
+    """
     text = script.read_text()
+    stage = re.search(r"# STAGE=(\w+)", text)
     base = {
         "run_id": f"run-{script.stem}",
         "slug": "toy",
         "exit_code": 0,
         "duration_s": 1.0,
         "script_sha256": "x",
+        "stage_reached": stage.group(1) if stage else "start",
     }
     if "# TAMPER" in text:
         return RunRecord(
@@ -103,6 +108,17 @@ def test_node_dies_after_max_debug_attempts_and_search_restarts(ws, settings, pa
         ("buggy", 0), ("buggy", 1), ("dead", 2), ("buggy", 0),
     ]  # fmt: skip
     assert tree.nodes[3].operator == "draft"
+
+
+def test_stage_is_recorded_logged_and_handed_to_debug(ws, settings, parts):
+    tree, coder, logs = _search(
+        ws, settings, parts, [marker("# CRASH\n# STAGE=features"), marker("# CV=0.8")],
+        policy=GreedyPolicy(num_drafts=1, debug_prob=1.0), max_nodes=2,
+    )  # fmt: skip
+
+    assert tree.get("n001").stage == "features"
+    assert "(reached features)" in logs[0]
+    assert "How far it got: The features were built" in coder.user_text(1)
 
 
 def test_next_draft_is_told_about_the_branch_that_died(ws, settings, parts):

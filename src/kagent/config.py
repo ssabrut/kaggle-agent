@@ -34,8 +34,8 @@ class Settings(BaseSettings):
     max_dep_requests: int = 5  # per search session
 
     # OpenAI-compatible servers (mlx_lm.server), one per role.
-    planner_base_url: str = "http://jupyter-01.aml1.id.iosda.org:11000/v1"
-    coder_base_url: str = "http://jupyter-01.aml1.id.iosda.org:10000/v1"
+    planner_base_url: str = "http://jupyter-02.aml1.id.iosda.org:11000/v1"
+    coder_base_url: str = "http://jupyter-02.aml1.id.iosda.org:10000/v1"
     planner_model: str = "mlx-community/Qwen3.8-Flash-Next-4bit"
     coder_model: str = "mlx-community/Qwen3-Coder-Next-4bit"
     llm_timeout_s: float = 900

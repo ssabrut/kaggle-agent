@@ -28,6 +28,7 @@ class Node:
     error: str = ""  # short failure description for buggy/dead nodes
     run_id: str | None = None
     debug_depth: int = 0  # consecutive debug ancestors, including this node
+    stage: str = ""  # furthest step its run reached (kagent.stages); empty on older nodes
     dep_request: str | None = None  # the dependency request a blocked node waits on
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 

@@ -22,6 +22,18 @@ PREDICTION_HINT = {
     "mae": "the predicted numeric value",
 }
 
+# What a failed run had finished, keyed by kagent.stages. Worded to fit a timeout as well as a crash.
+STAGE_PROGRESS = {
+    "start": "It reported no finished step, so it stopped while loading the data or before "
+    "its first STAGE line.",
+    "load": "The data loaded; it stopped before the feature matrix was built.",
+    "features": "The features were built; it stopped before cross-validation finished.",
+    "cv": "Cross-validation finished and oof.csv was written; it stopped before submission.csv "
+    "was written.",
+    "predict": "submission.csv was written; the problem comes after that or is in the "
+    "submission itself.",
+}
+
 CLIP_CODE = 12_000
 CLIP_TEXT = 6_000
 CLIP_LOG = 3_000
@@ -76,7 +88,11 @@ def contract(
 - Commit to ONE final model or blend. oof.csv, submission.csv and the printed score must all
   come from that same model; if you compare several models, keep the best one's predictions and
   do not overwrite them with a later model's. The grader recomputes the score from oof.csv alone.
-- Print the cross-validated {metric} and the main steps to stdout.
+- Print the cross-validated {metric} to stdout. Also print a line `STAGE: <name>` as each step
+  finishes, only after it has really finished: `STAGE: load` once the data is read,
+  `STAGE: features` once the feature matrix is built, `STAGE: cv` once every fold is done and
+  oof.csv is written, `STAGE: predict` once submission.csv is written. A failed run is
+  diagnosed from these lines.
 - Hard limits per run: {step_timeout_s} s wall clock, {cpus:g} CPUs, {memory} RAM. Keep the
   script well inside them (subsample or limit estimators if needed)."""
 
@@ -191,7 +207,13 @@ this idea requires. Update the '# PLAN:' header to mention the change."""
     return [{"role": "system", "content": SYSTEM_CODER}, {"role": "user", "content": user}]
 
 
-def code_debug(*, contract_text: str, code: str, error: str) -> list[Message]:
+def progress_note(stage: str) -> str:
+    """Where the failed run stopped; empty when the stage is unknown or nothing is left to fix."""
+    text = STAGE_PROGRESS.get(stage)
+    return f"\nHow far it got: {text}\n" if text else ""
+
+
+def code_debug(*, contract_text: str, code: str, error: str, stage: str = "") -> list[Message]:
     user = f"""{contract_text}
 
 This script failed.
@@ -203,7 +225,7 @@ Error output:
 ```
 {clip(error, CLIP_LOG)}
 ```
-
+{progress_note(stage)}
 Fix the problem without changing the overall approach. Return the complete corrected script."""
     return [{"role": "system", "content": SYSTEM_CODER}, {"role": "user", "content": user}]
 

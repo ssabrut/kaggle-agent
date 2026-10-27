@@ -173,6 +173,27 @@ def test_policy_debugs_when_probability_says_so(tmp_path):
     assert (never.operator, never.parent.id) == ("improve", "n001")
 
 
+def test_policy_debugs_the_failure_that_got_furthest(tmp_path):
+    tree = _tree(tmp_path)
+    _add(tree, "buggy", stage="start")
+    _add(tree, "buggy", stage="cv")
+    _add(tree, "buggy", stage="load")
+    for seed in range(5):
+        action = GreedyPolicy(num_drafts=3, debug_prob=1.0, seed=seed).select(tree)
+        assert (action.operator, action.parent.id) == ("debug", "n002")
+
+
+def test_policy_treats_unstaged_failures_alike(tmp_path):
+    tree = _tree(tmp_path)
+    _add(tree, "buggy")
+    _add(tree, "buggy", stage="start")
+    picked = {
+        GreedyPolicy(num_drafts=2, debug_prob=1.0, seed=seed).select(tree).parent.id
+        for seed in range(20)
+    }
+    assert picked == {"n001", "n002"}
+
+
 def test_policy_always_debugs_when_nothing_has_worked(tmp_path):
     tree = _tree(tmp_path)
     _add(tree, "buggy")

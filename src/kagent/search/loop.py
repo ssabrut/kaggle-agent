@@ -70,6 +70,7 @@ def _evaluate(
     max_debug: int,
 ) -> None:
     """Fill in the node's status, score and error from what the run produced."""
+    base.stage = record.stage_reached
     if record.status == "integrity_violation":
         base.status = "dead"
         base.error = "integrity violation: " + "; ".join(record.integrity_changes)
@@ -110,7 +111,8 @@ def _describe(node: Node, operator: str) -> str:
     else:
         detail = node.error.strip().splitlines()[-1][:100] if node.error.strip() else ""
     origin = f" <- {node.parent}" if node.parent else ""
-    return f"{node.id} {operator}{origin}: {node.status} {detail}"
+    reached = f" (reached {node.stage})" if node.stage and node.status in ("buggy", "dead") else ""
+    return f"{node.id} {operator}{origin}: {node.status}{reached} {detail}"
 
 
 def _settle_blocked(
@@ -223,6 +225,7 @@ def run_search(
             sandbox_cpus=settings.sandbox_cpus,
             sandbox_memory=settings.sandbox_memory,
             error_log=parent.error if action.operator == "debug" and parent else "",
+            stage=parent.stage if action.operator == "debug" and parent else "",
             blocklist=build_blocklist(
                 tree,
                 {normalize(name) for name in libraries},
