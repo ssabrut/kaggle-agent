@@ -159,6 +159,41 @@ h1, h2, h3, p { margin: 0; }
   border: 1px solid var(--ring); border-radius: 8px; cursor: pointer;
 }
 .btn:hover { background: var(--hover); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn.primary { background: var(--ink); color: var(--surface); border-color: var(--ink); font-weight: 600; }
+.btn.primary:hover:not(:disabled) { opacity: 0.88; }
+.glyph.starting { color: var(--warn); }
+.glyph.crashed { color: var(--crit); }
+
+/* Start-a-search form */
+.form { display: grid; gap: 12px; }
+.form header { margin-bottom: 0; }
+.form fieldset { margin: 0; padding: 10px 12px 12px; border: 1px solid var(--grid); border-radius: 10px; }
+.form legend { padding: 0 6px; font-weight: 600; font-size: 13px; }
+.fields { display: grid; gap: 10px 14px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.field label { display: block; font-size: 12.5px; color: var(--ink-2); margin-bottom: 2px; }
+.field input {
+  width: 100%; padding: 6px 8px; font: inherit; color: var(--ink);
+  background: var(--page); border: 1px solid var(--axis); border-radius: 8px;
+}
+.field input:focus-visible { outline: 2px solid var(--s1); outline-offset: 1px; }
+.field .hint { margin-top: 2px; }
+.form details summary { cursor: pointer; font-weight: 600; font-size: 13px; }
+.checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.checks li { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.cmd {
+  margin: 0; padding: 8px 10px; background: var(--code-bg); border-radius: 8px;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-2);
+}
+.form-error { color: var(--ink); background: var(--hover); border-left: 3px solid var(--crit); padding: 6px 10px; border-radius: 4px; }
+.actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.toast {
+  position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 60;
+  max-width: min(560px, calc(100vw - 32px)); padding: 10px 14px;
+  background: var(--ink); color: var(--surface); border-radius: 10px; font-size: 13px;
+}
+#console { min-height: 60px; max-height: 320px; }
 .btn:focus-visible, .chip:focus-visible, tr:focus-visible, .node:focus-visible, .link:focus-visible,
 .overlay:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
 

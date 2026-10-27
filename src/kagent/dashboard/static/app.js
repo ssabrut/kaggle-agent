@@ -32,6 +32,8 @@
     finished: { glyph: "✓", label: "Finished" },
     stopped: { glyph: "■", label: "Stopped" },
     lost: { glyph: "✕", label: "Stopped unexpectedly" },
+    starting: { glyph: "…", label: "Starting" },
+    crashed: { glyph: "✕", label: "Did not start" },
     never: { glyph: "○", label: "No search yet" },
   };
   const DEP_GLYPH = { pending: "…", approved: "✓", denied: "✕", expired: "✕" };
@@ -220,7 +222,9 @@
   function nowText() {
     const run = S.state && S.state.run;
     if (!run) return "";
-    if (run.state === "never") return "No search has started in this workspace. Run `kagent search`; this page updates by itself.";
+    if (run.state === "never") return RUN_ON ? "No search has started in this workspace. Use Start search." : "No search has started in this workspace. Run `kagent search`; this page updates by itself.";
+    if (run.state === "starting") return "Launching the search process. Preflight checks run first; see the console.";
+    if (run.state === "crashed") return "The last launch ended before the search began. The console below shows why.";
     if (run.state !== "running") return run.message || (run.state === "lost" ? "The search process is gone without having finished." : "");
     const t = nowSec();
     const node = run.node ? ` ${run.node}` : "";
@@ -992,6 +996,249 @@
     drawer.hidden = false;
   }
 
+  // ---- run controls --------------------------------------------------------------------
+
+  const metaContent = (name) => {
+    const el = document.querySelector(`meta[name="${name}"]`);
+    return el ? el.content : "";
+  };
+  const TOKEN = metaContent("kagent-token");
+  const RUN_ON = metaContent("kagent-run") === "on" && TOKEN !== "";
+
+  async function post(path, body) {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Kagent-Token": TOKEN },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(res.status === 403 ? "This page is out of date. Reload it." : data.error || `HTTP ${res.status}`);
+      err.fields = data.fields || [];
+      throw err;
+    }
+    return data;
+  }
+
+  let toastTimer = 0;
+  function toast(text) {
+    const el = $("#toast");
+    el.textContent = text;
+    el.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      el.hidden = true;
+    }, 7000);
+  }
+
+  function renderRunButtons() {
+    const run = S.state ? S.state.run : null;
+    const busy = Boolean(run && (run.state === "running" || run.state === "starting"));
+    if (!busy) S.stopping = false;
+    const start = $("#run-btn");
+    const stop = $("#stop-btn");
+    start.hidden = !RUN_ON;
+    start.disabled = busy;
+    start.title = busy ? "A search is already running" : "Choose settings and start a search";
+    stop.hidden = !(RUN_ON && busy);
+    stop.textContent = S.stopping ? "Force stop" : "Stop";
+  }
+
+  async function stopSearch() {
+    const force = Boolean(S.stopping);
+    const ask = force
+      ? "Force-stop the search now? The step in progress is lost."
+      : "Stop the search? The step in progress is abandoned. The tree is kept, and a later run resumes from it.";
+    if (!window.confirm(ask)) return;
+    try {
+      await post("/api/search/stop", { force });
+      S.stopping = true;
+      toast(force ? "Force-stopping…" : "Stopping. If it does not end soon, press Force stop.");
+      pollNow();
+    } catch (err) {
+      toast(err.message);
+    }
+  }
+
+  async function renderConsole() {
+    const { data } = await get("/api/runlog");
+    const box = $("#console");
+    const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+    box.textContent = data.text || "Nothing yet. This shows the output of searches started from this page.";
+    S.consoleSize = data.size;
+    if (atEnd) box.scrollTop = box.scrollHeight;
+  }
+
+  const NUMBER_KEYS = ["budget_hours", "max_nodes", "num_drafts", "max_debug", "noise_k", "step_timeout_s", "sandbox_cpus", "llm_timeout_s", "llm_max_tokens"];
+  const TEXT_KEYS = ["planner_base_url", "planner_model", "coder_base_url", "coder_model", "sandbox_memory"];
+
+  async function openRunForm() {
+    let info;
+    try {
+      info = (await get("/api/launch")).data;
+    } catch (err) {
+      toast(err.message);
+      return;
+    }
+    if (!info.enabled) return;
+    const slug = S.state ? S.state.competition.slug : "";
+    const defaults = info.defaults;
+    const inputs = {};
+    let ready = false;
+    let seq = 0;
+    let timer = 0;
+
+    const field = (key, label, hint, attrs) => {
+      const id = `f-${key}`;
+      const input = h("input", { id, autocomplete: "off", spellcheck: "false", value: defaults[key] == null ? "" : String(defaults[key]), ...attrs });
+      inputs[key] = input;
+      input.addEventListener("input", changed);
+      return h("div", { class: "field" }, h("label", { for: id, text: label }), input, hint ? h("div", { class: "hint", text: hint }) : null);
+    };
+    const num = (label, key, hint, min, max, step) => field(key, label, hint, { type: "number", min, max, step });
+    const text = (label, key, hint) => field(key, label, hint, { type: "text" });
+
+    const collect = () => {
+      const body = {};
+      for (const key of NUMBER_KEYS) {
+        const raw = inputs[key].value.trim();
+        body[key] = raw === "" ? null : Number(raw);
+      }
+      for (const key of TEXT_KEYS) body[key] = inputs[key].value.trim();
+      return body;
+    };
+
+    const preview = h("pre", { class: "cmd" });
+    const updatePreview = () => {
+      const v = collect();
+      const parts = ["kagent search", `-c ${slug}`, `--budget-hours ${v.budget_hours}`, `--num-drafts ${v.num_drafts}`, `--max-debug ${v.max_debug}`, `--noise-k ${v.noise_k}`];
+      if (v.max_nodes != null) parts.push(`--max-nodes ${v.max_nodes}`);
+      preview.textContent = parts.join(" ") + `\nplanner ${v.planner_model} at ${v.planner_base_url}\ncoder   ${v.coder_model} at ${v.coder_base_url}`;
+    };
+
+    const checks = h("ul", { class: "checks" });
+    const problem = h("div", { class: "form-error", hidden: true });
+    const showProblem = (err) => {
+      const lines = err.fields && err.fields.length ? err.fields.map((f) => `${f.field}: ${f.message}`) : [err.message];
+      problem.textContent = lines.join("\n");
+      problem.hidden = false;
+    };
+
+    const startBtn = h("button", { class: "btn primary", type: "button", text: "Start search", disabled: true, onclick: submit });
+
+    async function preflight() {
+      const mine = ++seq;
+      problem.hidden = true;
+      startBtn.disabled = true;
+      checks.replaceChildren(h("li", { class: "muted", text: "Checking Docker, images and the model servers…" }));
+      try {
+        const result = await post("/api/preflight", collect());
+        if (mine !== seq) return;
+        checks.replaceChildren(
+          ...result.checks.map((c) =>
+            h(
+              "li",
+              {},
+              h("span", { class: `glyph ${c.status === "ok" ? "ok" : c.status === "warn" ? "blocked" : "dead"}`, "aria-hidden": "true", text: c.status === "ok" ? "✓" : c.status === "warn" ? "!" : "✕" }),
+              h("strong", { text: c.label }),
+              h("span", { class: "muted", text: c.message }),
+            ),
+          ),
+        );
+        ready = result.ready;
+        startBtn.disabled = !ready;
+      } catch (err) {
+        if (mine !== seq) return;
+        checks.replaceChildren();
+        showProblem(err);
+      }
+    }
+
+    function changed() {
+      updatePreview();
+      startBtn.disabled = true;
+      clearTimeout(timer);
+      timer = setTimeout(preflight, 700);
+    }
+
+    async function submit() {
+      startBtn.disabled = true;
+      problem.hidden = true;
+      try {
+        await post("/api/search/start", collect());
+        closeModal();
+        toast("Starting the search. This page follows it from here.");
+        S.stopping = false;
+        pollNow();
+      } catch (err) {
+        showProblem(err);
+        startBtn.disabled = !ready;
+      }
+    }
+
+    const presets = h(
+      "div",
+      { class: "group" },
+      ...[0.5, 1, 2, 6].map((hours) =>
+        h("button", { class: "chip", type: "button", text: `${hours} h`, onclick: () => { inputs.budget_hours.value = String(hours); changed(); } }),
+      ),
+    );
+
+    const modal = $("#modal");
+    modal.replaceChildren(
+      h(
+        "div",
+        { class: "box form", role: "dialog", "aria-modal": "true", "aria-label": "Start a search" },
+        h("header", { class: "inline" }, h("h2", { text: "Start a search" }), h("span", { class: "muted", text: slug })),
+        h("p", { class: "hint", text: "The models write Python that runs in Docker with no network. Settings are remembered for next time." }),
+        h("fieldset", {}, h("legend", { text: "How long and how wide" }),
+          h("div", { class: "fields" },
+            num("Time budget (hours)", "budget_hours", "The search stops when this is used up. Finished nodes are kept.", 0.05, 48, 0.05),
+            num("Stop after this many new nodes", "max_nodes", "Leave empty for no limit.", 1, 1000, 1),
+            num("Independent drafts first", "num_drafts", "Different starting approaches before improving.", 1, 10, 1),
+            num("Debug attempts per failing node", "max_debug", "After this many, the node is marked dead.", 0, 10, 1),
+            num("Noise floor (× fold std)", "noise_k", "A node must beat the best by this much to be built on.", 0, 5, 0.1),
+          ),
+          presets,
+        ),
+        h("fieldset", {}, h("legend", { text: "Models" }),
+          h("div", { class: "fields" },
+            text("Planner server URL", "planner_base_url", "OpenAI-compatible, ending in /v1"),
+            text("Planner model", "planner_model"),
+            text("Coder server URL", "coder_base_url", "OpenAI-compatible, ending in /v1"),
+            text("Coder model", "coder_model"),
+          ),
+        ),
+        h("fieldset", {}, h("legend", { text: "Sandbox for each run" }),
+          h("div", { class: "fields" },
+            num("Time limit per run (seconds)", "step_timeout_s", "", 30, 7200, 30),
+            num("CPUs", "sandbox_cpus", "", 0.5, 64, 0.5),
+            text("Memory", "sandbox_memory", "For example 8g or 512m"),
+          ),
+        ),
+        h("details", {}, h("summary", { text: "Advanced" }),
+          h("div", { class: "fields" },
+            num("Model call timeout (seconds)", "llm_timeout_s", "", 30, 7200, 30),
+            num("Max tokens per reply", "llm_max_tokens", "", 256, 65536, 256),
+          ),
+        ),
+        h("h3", { text: "Before it starts" }),
+        checks,
+        problem,
+        preview,
+        h("div", { class: "actions" },
+          h("button", { class: "btn", type: "button", text: "Recheck", onclick: preflight }),
+          h("button", { class: "btn", type: "button", text: "Cancel", onclick: closeModal }),
+          startBtn,
+        ),
+      ),
+    );
+    modal.hidden = false;
+    updatePreview();
+    preflight();
+    inputs.budget_hours.focus();
+  }
+
   // ---- polling and boot ----------------------------------------------------------------
 
   function safely(fn) {
@@ -1009,6 +1256,7 @@
 
   function renderAll() {
     safely(renderHeader);
+    safely(renderRunButtons);
     safely(renderFilters);
     renderBody();
     safely(renderClock);
@@ -1036,9 +1284,20 @@
       S.callLast = data.last;
       safely(renderLlm);
     }
+    if (st.run_log_size !== S.consoleSize) await renderConsole();
+  }
+
+  let polling = false;
+  let pollTimer = 0;
+  function pollNow() {
+    S.etag = null;
+    clearTimeout(pollTimer);
+    tick();
   }
 
   async function tick() {
+    if (polling) return;
+    polling = true;
     try {
       const res = await get("/api/state", S.etag);
       if (!res.same) {
@@ -1055,8 +1314,10 @@
       S.error = err.message;
       if (!S.state) $("#kpis").replaceChildren(h("div", { class: "empty", text: err.message }));
     }
+    polling = false;
     safely(renderClock);
-    setTimeout(tick, document.hidden ? 10 * POLL_MS : POLL_MS);
+    safely(renderRunButtons);
+    pollTimer = setTimeout(tick, document.hidden ? 10 * POLL_MS : POLL_MS);
   }
 
   function initTheme() {
@@ -1101,6 +1362,9 @@
     }, 150);
   });
 
+  $("#run-btn").addEventListener("click", openRunForm);
+  $("#stop-btn").addEventListener("click", stopSearch);
+  safely(renderRunButtons);
   initTheme();
   buildFilters();
   tick();

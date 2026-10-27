@@ -1,4 +1,5 @@
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -20,6 +21,7 @@ from kagent.competition_page import (
 )
 from kagent.config import CompetitionConfig, Settings
 from kagent.dashboard.demo import DemoRun
+from kagent.dashboard.launch import Launcher
 from kagent.dashboard.reader import WorkspaceReader
 from kagent.dashboard.server import is_loopback, make_server
 from kagent.deps.gate import DepGate
@@ -46,6 +48,11 @@ Competition = Annotated[str, typer.Option("--competition", "-c", help="Kaggle co
 
 def _workspace(slug: str) -> Workspace:
     return Workspace.for_slug(Settings(), slug)
+
+
+def _interrupt(signum: int, frame: object) -> None:
+    """Turn a stop request into the same clean shutdown as Ctrl-C."""
+    raise KeyboardInterrupt
 
 
 def _deps_dir(ws: Workspace) -> Path:
@@ -227,6 +234,7 @@ def search(
     """Run the draft/debug/improve loop. Resumes an existing tree in the workspace."""
     if policy != "greedy":
         raise typer.BadParameter("only 'greedy' is implemented")
+    signal.signal(signal.SIGTERM, _interrupt)  # a Stop from the dashboard ends like Ctrl-C
     settings = Settings()
     if not docker_available():
         typer.echo("docker daemon not reachable; start Docker and retry", err=True)
@@ -383,8 +391,11 @@ def dashboard(
     demo: Annotated[
         bool, typer.Option(help="Show an invented search that advances in real time.")
     ] = False,
+    read_only: Annotated[
+        bool, typer.Option("--read-only", help="Hide the Start and Stop buttons.")
+    ] = False,
 ) -> None:
-    """Live, read-only dashboard of a search. Run it beside `kagent search`."""
+    """Live dashboard of a search, with a form to start one. Run it beside `kagent search`."""
     settings = Settings()
     if demo:
         with tempfile.TemporaryDirectory(prefix="kagent-demo-") as tmp:
@@ -397,7 +408,13 @@ def dashboard(
     ws = Workspace.for_slug(settings, competition)
     if not ws.config_path.exists():
         raise typer.BadParameter(f"{ws.config_path} missing; run `kagent init` first")
-    _serve(ws, settings, host, port, open_browser)
+    launcher = None
+    if not read_only:
+        if is_loopback(host):
+            launcher = Launcher(ws, settings)
+        else:
+            typer.echo("run controls are off: only offered on a loopback address", err=True)
+    _serve(ws, settings, host, port, open_browser, launcher=launcher)
 
 
 def _serve(
@@ -407,14 +424,16 @@ def _serve(
     port: int,
     open_browser: bool,
     then: Callable[[], None] | None = None,
+    launcher: Launcher | None = None,
 ) -> None:
     try:
-        server = make_server(WorkspaceReader(ws, settings), host, port)
+        server = make_server(WorkspaceReader(ws, settings), host, port, launcher)
     except OSError as exc:
         typer.echo(f"cannot listen on {host}:{port}: {exc}; try --port 0", err=True)
         raise typer.Exit(1) from exc
     url = f"http://{host}:{server.server_address[1]}/"
-    typer.echo(f"dashboard for {ws.root.name} at {url} (read-only; Ctrl-C to stop)")
+    mode = "can start and stop searches" if launcher else "read-only"
+    typer.echo(f"dashboard for {ws.root.name} at {url} ({mode}; Ctrl-C to stop)")
     if not is_loopback(host):
         typer.echo("warning: reachable by the network; shows code, logs, prompts", err=True)
     if open_browser:

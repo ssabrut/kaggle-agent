@@ -31,6 +31,7 @@ RUN_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 SNIPPET_CHARS = 200
 TAIL_BYTES = 6_000
+RUN_LOG_BYTES = 12_000
 CODE_CHARS = 60_000
 MESSAGE_CHARS = 20_000
 RECENT_LATENCIES = 80
@@ -188,6 +189,8 @@ class WorkspaceReader:
             self.ws.search_dir / "trajectory.jsonl",
             self.ws.root / "deps" / "requests.jsonl",
             self.ws.selected_path,
+            self.ws.search_dir / "launch.json",
+            self.ws.search_dir / "run.log",
         ]
 
     def fingerprint(self) -> str:
@@ -199,8 +202,9 @@ class WorkspaceReader:
                 parts.append(f"{stat.st_mtime_ns}:{stat.st_size}")
             except OSError:
                 parts.append("-")
-        status = self._status()
+        status, launch = self._status(), self._launch()
         parts.append(str(pid_alive(status.get("pid")) if status else None))
+        parts.append(str(launch["alive"] if launch else None))
         return "|".join(parts)
 
     # -- small readers ---------------------------------------------------------------------
@@ -211,6 +215,14 @@ class WorkspaceReader:
         except (OSError, ValueError):
             return None
         return data if isinstance(data, dict) else None
+
+    def _launch(self) -> dict | None:
+        """The search the dashboard last started, whether or not it has begun reporting."""
+        info = self._json_file(self.ws.search_dir / "launch.json")
+        pid = info.get("pid")
+        if not isinstance(pid, int):
+            return None
+        return {"pid": pid, "started_at": info.get("started_at"), "alive": pid_alive(pid)}
 
     def _json_file(self, path: Path) -> dict:
         try:
@@ -320,9 +332,29 @@ class WorkspaceReader:
             "llm": self._llm_stats(),
             "event_count": len(self._events.rows),
             "call_count": len(self._calls.rows),
+            "run_log_size": self._run_log_size(),
         }
 
+    def _run_log_size(self) -> int:
+        path = self.ws.search_dir / "run.log"
+        return path.stat().st_size if is_regular_file(path) else 0
+
+    def run_log(self) -> dict:
+        """The tail of the console output of searches started from the dashboard."""
+        path = self.ws.search_dir / "run.log"
+        if not is_regular_file(path):
+            return {"text": "", "size": 0}
+        return {"text": _tail(path, RUN_LOG_BYTES), "size": path.stat().st_size}
+
     def _run_state(self, status: dict | None) -> dict:
+        launch = self._launch()
+        reporting = launch is not None and (status or {}).get("pid") == launch["pid"]
+        if launch is not None and not reporting:
+            if launch["alive"]:  # started from the page, not yet writing its own status
+                started = launch["started_at"]
+                return {"state": "starting", "pid": launch["pid"], "started_at": started}
+            if status is None or (status.get("started_at") or 0) < (launch["started_at"] or 0):
+                return {"state": "crashed", "started_at": launch["started_at"]}
         if status is None:
             return {"state": "never"}
         alive = pid_alive(status.get("pid"))

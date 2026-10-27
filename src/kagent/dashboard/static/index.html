@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="kagent-token" content="__TOKEN__">
+<meta name="kagent-run" content="__RUN__">
 <title>kagent dashboard</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="/style.css">
@@ -12,6 +14,8 @@
   <div class="brand"><span class="logo">kagent</span><span id="comp" class="muted"></span></div>
   <div id="pill" class="pill" role="status"></div>
   <div id="now" class="now"></div>
+  <button id="run-btn" class="btn primary" type="button" hidden>Start search…</button>
+  <button id="stop-btn" class="btn" type="button" hidden>Stop</button>
   <div id="live" class="live"></div>
   <button id="theme" class="btn" type="button">Theme</button>
   <div id="budget" class="budget" hidden>
@@ -85,11 +89,18 @@
     <ul class="list" id="blocklist"></ul>
     <p class="hint" id="params"></p>
   </section>
+
+  <section class="card span-12" aria-labelledby="h-console">
+    <h2 id="h-console">Console</h2>
+    <p class="sub">Output of searches started from this page.</p>
+    <pre class="block" id="console"></pre>
+  </section>
 </main>
 
 <aside id="drawer" class="drawer" hidden aria-label="Node detail"></aside>
 <div id="modal" class="modal" hidden></div>
 <div id="tip" class="tip" role="tooltip" hidden></div>
+<div id="toast" class="toast" role="status" hidden></div>
 <noscript><p class="empty">This dashboard needs JavaScript.</p></noscript>
 <script src="/app.js" defer></script>
 </body>

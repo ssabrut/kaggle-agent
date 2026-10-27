@@ -2,17 +2,22 @@
 
 import http.client
 import json
+import os
+import time
 import urllib.error
 import urllib.request
 
 import pytest
 from typer.testing import CliRunner
 
-from kagent.cli import app
+from kagent.cli import _interrupt, app
 from kagent.dashboard.demo import SCRIPT, DemoRun
+from kagent.dashboard.launch import LaunchError, RunRequest
 from kagent.dashboard.reader import JsonlTail, WorkspaceReader, json_safe, pid_alive
-from kagent.dashboard.server import make_server, start_in_background
+from kagent.dashboard.server import MAX_BODY, make_server, start_in_background
 from kagent.workspace import Workspace
+
+NO_PROCESS = 2**30  # a pid nothing is running as
 
 
 @pytest.fixture
@@ -295,6 +300,237 @@ def test_the_command_refuses_to_start_without_a_workspace(settings, args):
     env = {"KAGENT_WORKSPACES_DIR": str(settings.workspaces_dir)}
     result = CliRunner().invoke(app, ["dashboard", *args], env=env)
     assert result.exit_code == 2  # a usage error, and nothing was served
+
+
+# --- launched searches in the state -----------------------------------------------------------
+
+
+def write_launch(demo, pid, started_at):
+    path = demo.ws.search_dir / "launch.json"
+    path.write_text(json.dumps({"pid": pid, "started_at": started_at}))
+
+
+def set_status(demo, **changes):
+    path = demo.ws.search_dir / "status.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), **changes}))
+
+
+def test_a_launched_search_that_has_not_reported_yet_is_starting(reader, demo):
+    set_status(demo, pid=NO_PROCESS)  # the old status belongs to some other process
+    write_launch(demo, os.getpid(), time.time())
+
+    run = reader.state()["run"]
+
+    assert run["state"] == "starting" and run["pid"] == os.getpid()
+
+
+def test_a_launch_that_died_before_reporting_is_a_failed_start(reader, demo):
+    write_launch(demo, NO_PROCESS, time.time() + 60)  # newer than the status on file
+    assert reader.state()["run"]["state"] == "crashed"
+
+
+def test_a_launched_search_reports_through_its_own_status(reader, demo):
+    demo.progress.finish("finished", "time budget used up")
+    set_status(demo, pid=NO_PROCESS)
+    write_launch(demo, NO_PROCESS, time.time() - 60)
+
+    run = reader.state()["run"]
+
+    assert (run["state"], run["message"]) == ("finished", "time budget used up")
+
+
+def test_an_old_dead_launch_does_not_hide_a_newer_search(reader, demo):
+    write_launch(demo, NO_PROCESS, time.time() - 3600)
+    assert reader.state()["run"]["state"] == "running"
+
+
+def test_launch_files_and_the_console_log_change_the_fingerprint(reader, demo):
+    before = reader.fingerprint()
+    write_launch(demo, NO_PROCESS, time.time())
+    after_launch = reader.fingerprint()
+    (demo.ws.search_dir / "run.log").write_text("starting\n")
+
+    assert after_launch != before and reader.fingerprint() != after_launch
+
+
+def test_the_console_log_is_tailed(reader, demo):
+    assert reader.run_log() == {"text": "", "size": 0}
+    assert reader.state()["run_log_size"] == 0
+    (demo.ws.search_dir / "run.log").write_text("docker daemon not reachable\n")
+
+    assert reader.run_log() == {"text": "docker daemon not reachable\n", "size": 28}
+    assert reader.state()["run_log_size"] == 28
+
+
+def test_a_stop_request_ends_a_search_like_ctrl_c():
+    with pytest.raises(KeyboardInterrupt):
+        _interrupt(15, None)
+
+
+# --- run controls over HTTP -------------------------------------------------------------------
+
+
+class FakeLauncher:
+    def __init__(self):
+        self.started, self.stopped, self.failure = [], [], None
+
+    def state(self):
+        return {"enabled": True, "active": False, "pid": None, "defaults": {"max_nodes": None}}
+
+    def preflight(self, req):
+        check = {"id": "x", "label": "X", "status": "ok", "message": "fine"}
+        return {"checks": [check], "ready": True}
+
+    def start(self, req):
+        if self.failure:
+            raise LaunchError(self.failure)
+        self.started.append(req)
+        return {"pid": 123}
+
+    def stop(self, *, force=False):
+        if self.failure:
+            raise LaunchError(self.failure)
+        self.stopped.append(force)
+
+
+@pytest.fixture
+def controlled(reader):
+    launcher = FakeLauncher()
+    server = make_server(reader, launcher=launcher)
+    start_in_background(server)
+    yield server, launcher
+    server.shutdown()
+    server.server_close()
+
+
+def send(server, path, body=None, *, token=True, origin=True, content_type="application/json"):
+    port = server.server_address[1]
+    headers = {"Content-Type": content_type}
+    if token:
+        headers["X-Kagent-Token"] = server.token if token is True else token
+    if origin:
+        headers["Origin"] = f"http://127.0.0.1:{port}" if origin is True else origin
+    data = body if isinstance(body, bytes) else json.dumps(body or {}).encode()
+    return fetch(port, path, data=data, headers=headers, method="POST")
+
+
+def refused(server, path, body=None, **kwargs):
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        send(server, path, body, **kwargs)
+    return caught.value
+
+
+def settings_body(settings, **changes):
+    return {**RunRequest.defaults(settings).model_dump(), **changes}
+
+
+def test_the_page_carries_the_token_only_when_runs_can_be_started(controlled, served):
+    server, _ = controlled
+    with fetch(server.server_address[1], "/") as resp:
+        page = resp.read().decode()
+    assert server.token in page and 'name="kagent-run" content="on"' in page
+
+    with fetch(served, "/") as resp:
+        read_only = resp.read().decode()
+    assert 'name="kagent-run" content="off"' in read_only and "__TOKEN__" not in read_only
+
+
+def test_start_hands_validated_settings_to_the_launcher(controlled, settings):
+    server, launcher = controlled
+    with send(server, "/api/search/start", settings_body(settings, max_nodes=9)) as resp:
+        assert json.load(resp) == {"pid": 123}
+    assert launcher.started[0].max_nodes == 9
+
+
+def test_preflight_and_stop_work_with_the_same_protections(controlled, settings):
+    server, launcher = controlled
+    with send(server, "/api/preflight", settings_body(settings)) as resp:
+        assert json.load(resp)["ready"] is True
+    with send(server, "/api/search/stop", {"force": True}) as resp:
+        assert json.load(resp) == {"stopping": True}
+    assert launcher.stopped == [True]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"token": False},
+        {"token": "not-the-token"},
+        {"origin": False},
+        {"origin": "http://evil.example"},
+        {"origin": "https://127.0.0.1"},
+    ],
+)
+def test_a_post_without_the_right_token_and_origin_is_forbidden(controlled, settings, kwargs):
+    server, launcher = controlled
+    error = refused(server, "/api/search/start", settings_body(settings), **kwargs)
+    assert error.code == 403 and launcher.started == []
+
+
+def test_a_post_must_be_json_and_a_json_object(controlled, settings):
+    server, launcher = controlled
+    wrong_type = refused(server, "/api/search/start", b"x=1", content_type="text/plain")
+    not_json = refused(server, "/api/search/start", b"{oops")
+    not_object = refused(server, "/api/search/start", b"[1, 2]")
+    assert (wrong_type.code, not_json.code, not_object.code) == (415, 400, 400)
+    assert launcher.started == []
+
+
+def test_an_oversized_body_is_refused_unread(controlled):
+    server, _ = controlled
+    conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+    conn.putrequest("POST", "/api/search/start")
+    for key, value in {
+        "Content-Type": "application/json",
+        "Content-Length": str(MAX_BODY + 1),
+        "X-Kagent-Token": server.token,
+        "Origin": f"http://127.0.0.1:{server.server_address[1]}",
+    }.items():
+        conn.putheader(key, value)
+    conn.endheaders()
+    assert conn.getresponse().status == 413
+
+
+def test_invalid_settings_come_back_field_by_field(controlled, settings):
+    server, launcher = controlled
+    error = refused(server, "/api/search/start", settings_body(settings, budget_hours=0))
+    body = json.load(error)
+    assert error.code == 422 and body["error"] == "invalid settings"
+    assert [f["field"] for f in body["fields"]] == ["budget_hours"]
+    assert launcher.started == []
+
+
+def test_a_launch_that_cannot_proceed_is_a_conflict(controlled, settings):
+    server, launcher = controlled
+    launcher.failure = "a search is already running"
+    start = refused(server, "/api/search/start", settings_body(settings))
+    stop = refused(server, "/api/search/stop")
+    assert (start.code, stop.code) == (409, 409)
+    assert json.load(start)["error"] == "a search is already running"
+
+
+def test_a_read_only_server_refuses_every_post(served):
+    headers = {"Content-Type": "application/json"}
+    for path in ("/api/search/start", "/api/preflight", "/api/search/stop"):
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            fetch(served, path, data=b"{}", headers=headers, method="POST")
+        assert caught.value.code == 405
+
+
+def test_launch_state_and_console_endpoints(controlled, served, demo):
+    server, _ = controlled
+    with fetch(server.server_address[1], "/api/launch") as resp:
+        assert json.load(resp)["enabled"] is True
+    with fetch(served, "/api/launch") as resp:
+        assert json.load(resp) == {"enabled": False}
+    (demo.ws.search_dir / "run.log").write_text("hello\n")
+    with fetch(served, "/api/runlog") as resp:
+        assert json.load(resp) == {"text": "hello\n", "size": 6}
+
+
+def test_run_controls_are_refused_on_a_network_bind(reader):
+    with pytest.raises(ValueError, match="loopback"):
+        make_server(reader, host="0.0.0.0", launcher=FakeLauncher())
 
 
 def test_a_workspace_without_config_explains_itself(settings):
