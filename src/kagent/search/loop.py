@@ -216,7 +216,7 @@ def run_search(
                 say(reason)
                 break
 
-            progress.phase("selecting", node=None, op=None)
+            progress.phase("selecting", node=None, op=None, parent=None)
             step_timeout = int(min(settings.step_timeout_s, remaining))
             if deps is not None:
                 _settle_blocked(
@@ -230,6 +230,7 @@ def run_search(
                 "writing",
                 node=tree.next_id(),
                 op=action.operator,
+                parent=parent.id if parent else None,
                 detail=f"from {parent.id}" if parent else "new draft",
             )
             libraries = sandbox_versions(settings.docker_dir)

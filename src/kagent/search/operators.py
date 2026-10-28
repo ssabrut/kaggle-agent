@@ -80,9 +80,9 @@ def extract_code(text: str) -> str:
     return code + "\n"
 
 
-def _write_code(coder: ChatClient, messages: list[Message]) -> str:
+def _write_code(coder: ChatClient, messages: list[Message], purpose: str) -> str:
     """Ask the coder for code; if the reply is unusable, give it one chance to repair."""
-    reply = coder.chat(messages)
+    reply = coder.chat(messages, purpose=purpose)
     try:
         return extract_code(reply)
     except OperatorError as first:
@@ -95,7 +95,7 @@ def _write_code(coder: ChatClient, messages: list[Message]) -> str:
                 "```python block and nothing else.",
             },
         ]
-        return extract_code(coder.chat(retry))
+        return extract_code(coder.chat(retry, purpose="repair an unusable reply"))
 
 
 def _tried(ctx: Context, node: Node) -> list[tuple[str, str]]:
@@ -128,10 +128,13 @@ class DraftOperator:
                 remaining_min=ctx.remaining_min,
                 libraries=ctx.libraries,
                 blocklist=ctx.blocklist,
-            )
+            ),
+            purpose="plan a new approach",
         )
         return _write_code(
-            self.coder, prompts.code_from_plan(contract_text=ctx.contract(), plan=plan)
+            self.coder,
+            prompts.code_from_plan(contract_text=ctx.contract(), plan=plan),
+            "write the script for the plan",
         )
 
 
@@ -156,10 +159,13 @@ class ImproveOperator:
                 remaining_min=ctx.remaining_min,
                 libraries=ctx.libraries,
                 blocklist=ctx.blocklist,
-            )
+            ),
+            purpose="plan an improvement",
         )
         return _write_code(
-            self.coder, prompts.code_improve(contract_text=ctx.contract(), code=code, idea=idea)
+            self.coder,
+            prompts.code_improve(contract_text=ctx.contract(), code=code, idea=idea),
+            "apply the improvement",
         )
 
 
@@ -177,7 +183,7 @@ class DebugOperator:
             error=ctx.error_log,
             stage=ctx.stage,
         )
-        return _write_code(self.coder, messages)
+        return _write_code(self.coder, messages, "fix the failing script")
 
 
 def summarize(
@@ -187,5 +193,6 @@ def summarize(
         prompts.summarize_run(code=code, log=log, metric=metric, cv_score=cv_score, cv_std=cv_std),
         max_tokens=400,
         temperature=0.2,
+        purpose="summarize the run",
     )
     return text[:SUMMARY_CHARS]

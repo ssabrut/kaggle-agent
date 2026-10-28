@@ -12,6 +12,10 @@
 <body>
 <header class="top">
   <div class="brand"><span class="logo">kagent</span><span id="comp" class="muted"></span></div>
+  <div class="views" role="tablist" aria-label="View">
+    <button id="tab-live" class="tab" role="tab" type="button" aria-controls="view-live" aria-selected="false" tabindex="-1"><span id="tab-dot" class="pulse" aria-hidden="true" hidden>●</span>Live</button>
+    <button id="tab-overview" class="tab" role="tab" type="button" aria-controls="view-overview" aria-selected="true">Overview</button>
+  </div>
   <div id="pill" class="pill" role="status"></div>
   <div id="now" class="now"></div>
   <button id="run-btn" class="btn primary" type="button" hidden>Start search…</button>
@@ -24,6 +28,32 @@
   </div>
 </header>
 
+<div id="view-live" class="live-view" role="tabpanel" aria-labelledby="tab-live" hidden>
+  <section class="stepbar" aria-label="Current step">
+    <div class="step-head" id="step-head"></div>
+    <ol class="pipeline" id="pipeline" aria-label="Stages of the current step" hidden></ol>
+  </section>
+
+  <div class="panes">
+    <section class="pane" id="pane-planner" aria-labelledby="h-pane-planner"></section>
+    <section class="pane" id="pane-coder" aria-labelledby="h-pane-coder"></section>
+  </div>
+
+  <div class="live-lower">
+    <section class="card" aria-labelledby="h-rail">
+      <h2 id="h-rail">Recent model calls</h2>
+      <p class="sub">Click one to replay its reply in its pane. “live” returns to the call being written.</p>
+      <div class="rail" id="rail"></div>
+    </section>
+    <section class="card" aria-labelledby="h-live-feed">
+      <h2 id="h-live-feed">Latest results</h2>
+      <p class="sub">What the search recorded after each step.</p>
+      <ul class="feed short" id="live-feed"></ul>
+    </section>
+  </div>
+</div>
+
+<div id="view-overview" role="tabpanel" aria-labelledby="tab-overview">
 <nav class="filters" aria-label="Filters">
   <div class="group" id="f-op"><span class="label">Operator</span></div>
   <div class="group" id="f-status"><span class="label">Status</span></div>
@@ -96,6 +126,7 @@
     <pre class="block" id="console"></pre>
   </section>
 </main>
+</div>
 
 <aside id="drawer" class="drawer" hidden aria-label="Node detail"></aside>
 <div id="modal" class="modal" hidden></div>

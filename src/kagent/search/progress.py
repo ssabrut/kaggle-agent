@@ -1,7 +1,8 @@
 """Live status of a running search, for the dashboard or anyone tailing the files.
 
-status.json is rewritten at every phase change; events.jsonl is append-only. Both sit in the
-workspace's search/ directory, so another process can follow a search without talking to it.
+status.json is rewritten at every phase change; events.jsonl is append-only; live/ holds the model
+reply being written (kagent.search.live). All sit in the workspace's search/ directory, so another
+process can follow a search without talking to it.
 """
 
 import json
@@ -11,6 +12,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from kagent.search.live import LiveFeed
 from kagent.workspace import Workspace
 
 KEEP: Any = object()  # passed for node/operator to leave the field as it is
@@ -28,6 +30,7 @@ class Progress:
         ws.search_dir.mkdir(parents=True, exist_ok=True)
         self.status_path = ws.search_dir / "status.json"
         self.events_path = ws.search_dir / "events.jsonl"
+        self.live = LiveFeed(ws.search_dir / "live", clock)
         self._clock = clock
         now = clock()
         self._status: dict[str, Any] = {
@@ -40,6 +43,7 @@ class Progress:
             "phase": "starting",
             "node": None,
             "operator": None,
+            "parent": None,
             "detail": "",
             "phase_since": now,
             "llm": None,  # {"role", "since"} while a model call is in flight
@@ -68,7 +72,15 @@ class Progress:
         with self.events_path.open("a") as fh:
             fh.write(json.dumps(entry) + "\n")
 
-    def phase(self, name: str, *, node: Any = KEEP, op: Any = KEEP, detail: str = "") -> None:
+    def phase(
+        self,
+        name: str,
+        *,
+        node: Any = KEEP,
+        op: Any = KEEP,
+        parent: Any = KEEP,
+        detail: str = "",
+    ) -> None:
         self._status["phase"] = name
         self._status["phase_since"] = self._clock()
         self._status["detail"] = detail
@@ -76,19 +88,43 @@ class Progress:
             self._status["node"] = node
         if op is not KEEP:
             self._status["operator"] = op
+        if parent is not KEEP:
+            self._status["parent"] = parent
         self._write()
 
-    # ChatClient observer: which model the search is waiting on right now.
-    def call_started(self, role: str) -> None:
+    # ChatClient observer: which model the search is waiting on right now, and what it has said.
+    def call_started(
+        self,
+        role: str,
+        *,
+        model: str = "",
+        purpose: str = "",
+        messages: list[dict[str, str]] | None = None,
+    ) -> None:
         self._status["llm"] = {"role": role, "since": self._clock()}
         self._write()
+        self.live.start(
+            role,
+            model=model,
+            purpose=purpose,
+            node=self._status["node"],
+            operator=self._status["operator"],
+            parent=self._status["parent"],
+            messages=messages or [],
+        )
 
-    def call_finished(self, role: str) -> None:
+    def call_progress(self, role: str, *, thinking: str, answer: str, chunks: int) -> None:
+        self.live.progress(role, thinking=thinking, answer=answer, chunks=chunks)
+
+    def call_finished(self, role: str, *, ok: bool = True) -> None:
         self._status["llm"] = None
         self._write()
+        self.live.finish(role, ok=ok)
 
     def finish(self, state: str, message: str = "") -> None:
-        self._status.update(state=state, phase="done", node=None, operator=None, llm=None)
+        self._status.update(
+            state=state, phase="done", node=None, operator=None, parent=None, llm=None
+        )
         self._status["message"] = message
         self._write()
         self.event(f"search {state}" + (f": {message}" if message else ""))

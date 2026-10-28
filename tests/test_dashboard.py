@@ -162,7 +162,7 @@ def test_events_and_calls_arrive_incrementally(settings):
 def test_call_detail_includes_the_prompt_and_reply_without_trusting_size(reader):
     call = reader.call(0)
     assert call["role"] == "planner" and call["messages"][-1]["role"] == "user"
-    assert call["response"].startswith("(demo reply)")
+    assert call["response"].startswith("Idea: ")
     assert reader.call(10_000) is None and reader.call(-1) is None
 
 
@@ -205,6 +205,100 @@ def test_playing_the_demo_to_the_end_finishes_the_search(settings):
     status = json.loads((run.ws.search_dir / "status.json").read_text())
     assert (status["state"], status["message"]) == ("finished", "demo complete")
     assert len(run.tree) == len(SCRIPT) and run.done
+
+
+def test_playing_the_demo_streams_each_reply_a_little_at_a_time(settings):
+    run = DemoRun(Workspace.for_slug(settings, "stream"))
+    watcher = WorkspaceReader(run.ws, settings)
+    growth: dict[str, list[int]] = {}
+
+    def watch(_seconds):
+        record = watcher.live()["calls"]["coder"]
+        if record and not record["done"]:
+            growth.setdefault(record["id"], []).append(len(record["answer"]))
+
+    run.play(sleep=watch)
+
+    assert growth and all(sizes == sorted(sizes) for sizes in growth.values())
+    assert max(len(set(sizes)) for sizes in growth.values()) > 5
+    final = watcher.live()["calls"]
+    assert final["coder"]["done"] and "```python" in final["coder"]["answer"]
+    assert final["planner"]["done"] and final["planner"]["thinking"]
+    assert final["planner"]["parent"] and final["planner"]["node"]
+
+
+# --- the model replies as they are written ------------------------------------------------------
+
+
+def start_call(demo, role, answer=""):
+    demo.progress.call_started(role, model="m", purpose="write", messages=[])
+    demo.progress.call_progress(role, thinking="", answer=answer, chunks=len(answer))
+
+
+def test_the_live_view_has_nothing_before_a_model_has_spoken(reader):
+    live = reader.live()
+    assert live["calls"] == {"planner": None, "coder": None}
+    assert reader.live_prompt("coder") is None
+
+
+def test_each_role_reports_its_own_call(demo, reader):
+    start_call(demo, "coder", "def f(): pass")
+    calls = reader.live()["calls"]
+    assert calls["planner"] is None
+    assert (calls["coder"]["answer"], calls["coder"]["purpose"]) == ("def f(): pass", "write")
+    assert calls["coder"]["done"] is False
+
+
+def test_the_prompt_comes_back_for_a_known_role_only(demo, reader):
+    messages = [{"role": "user", "content": "x" * 50_000}]
+    demo.progress.call_started("planner", messages=messages)
+
+    prompt = reader.live_prompt("planner")
+
+    assert prompt["role"] == "planner" and prompt["messages"][0]["role"] == "user"
+    assert len(prompt["messages"][0]["content"]) < 50_000  # long prompts are cut, like replies
+    for role in ("nobody", "../status", "coder"):
+        assert reader.live_prompt(role) is None  # not a pane, or nothing recorded yet
+
+
+def test_live_fingerprint_moves_with_every_update(demo, reader):
+    before = reader.live_fingerprint()
+    start_call(demo, "coder", "a")
+    during = reader.live_fingerprint()
+    demo.progress.call_progress("coder", thinking="", answer="ab", chunks=2)
+    assert len({before, during, reader.live_fingerprint()}) == 3
+
+
+def test_live_replies_do_not_change_the_state_fingerprint(demo, reader):
+    """The page polls state slowly and the live view fast; one must not wake the other."""
+    start_call(demo, "coder", "x")
+    before = reader.fingerprint()
+    demo.progress.call_progress("coder", thinking="", answer="xy", chunks=2)
+    demo.progress.call_progress("coder", thinking="", answer="xyz", chunks=3)
+    assert reader.fingerprint() == before
+
+
+def test_live_endpoints_are_served(served, demo):
+    start_call(demo, "coder", "print(1)")
+
+    with fetch(served, "/api/live") as resp:
+        etag = resp.headers["ETag"]
+        body = json.load(resp)
+    assert body["calls"]["coder"]["answer"] == "print(1)" and body["calls"]["planner"] is None
+
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        fetch(served, "/api/live", headers={"If-None-Match": etag})
+    assert caught.value.code == 304
+
+    with fetch(served, "/api/live/prompt/coder") as resp:
+        assert json.load(resp)["role"] == "coder"
+
+
+@pytest.mark.parametrize("role", ["nobody", "..%2Fstatus", "planner"])
+def test_prompts_of_unknown_roles_are_not_found(served, role):
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        fetch(served, f"/api/live/prompt/{role}")
+    assert caught.value.code == 404
 
 
 # --- the HTTP server --------------------------------------------------------------------------

@@ -764,28 +764,34 @@
 
   // ---- activity feed -------------------------------------------------------------------
 
+  function feedItems(items) {
+    if (!items.length) return [h("li", { class: "muted", text: "Nothing yet." })];
+    return items.map((e) => {
+      const found = /: (ok|buggy|dead|blocked)\b/.exec(e.text);
+      const li = h(
+        "li",
+        e.node ? { tabindex: 0, role: "button", class: "clickable" } : {},
+        h("span", { class: "time", text: clock(e.ts) }),
+        found ? h("span", { class: `glyph ${found[1]}`, "aria-hidden": "true", text: GLYPH[found[1]] }) : h("span"),
+        h("span", { class: "text", text: e.text }),
+      );
+      if (e.node) {
+        li.addEventListener("click", () => openNode(e.node));
+        li.addEventListener("keydown", (ev) => {
+          if (ev.key === "Enter") openNode(e.node);
+        });
+      }
+      return li;
+    });
+  }
+
   function renderFeed() {
-    const items = S.events.slice(-200).reverse();
-    $("#feed").replaceChildren(
-      ...items.map((e) => {
-        const found = /: (ok|buggy|dead|blocked)\b/.exec(e.text);
-        const li = h(
-          "li",
-          e.node ? { tabindex: 0, role: "button", class: "clickable" } : {},
-          h("span", { class: "time", text: clock(e.ts) }),
-          found ? h("span", { class: `glyph ${found[1]}`, "aria-hidden": "true", text: GLYPH[found[1]] }) : h("span"),
-          h("span", { class: "text", text: e.text }),
-        );
-        if (e.node) {
-          li.addEventListener("click", () => openNode(e.node));
-          li.addEventListener("keydown", (ev) => {
-            if (ev.key === "Enter") openNode(e.node);
-          });
-        }
-        return li;
-      }),
-    );
-    if (!items.length) $("#feed").replaceChildren(h("li", { class: "muted", text: "Nothing yet." }));
+    $("#feed").replaceChildren(...feedItems(S.events.slice(-200).reverse()));
+    renderLiveFeed();
+  }
+
+  function renderLiveFeed() {
+    $("#live-feed").replaceChildren(...feedItems(S.events.slice(-10).reverse()));
   }
 
   // ---- models --------------------------------------------------------------------------
@@ -862,21 +868,30 @@
     box.replaceChildren(...[...sections, table].filter(Boolean));
   }
 
-  async function openCall(index) {
+  // A prompt and, when there is one, the reply to it, in the modal.
+  function showTranscript(title, meta, messages, reply) {
     const modal = $("#modal");
+    modal.replaceChildren(
+      h(
+        "div",
+        { class: "box", role: "dialog", "aria-modal": "true", "aria-label": title },
+        h("header", { class: "inline" }, h("h2", { text: title }), h("span", { class: "muted", text: meta }), h("button", { class: "btn", type: "button", onclick: closeModal, text: "Close (Esc)" })),
+        ...messages.flatMap((m) => [h("h3", { text: m.role }), h("pre", { class: "block", text: m.content })]),
+        reply == null ? null : [h("h3", { text: "reply" }), h("pre", { class: "block", text: reply })],
+      ),
+    );
+    modal.hidden = false;
+  }
+
+  async function openCall(index) {
     try {
       const { data } = await get(`/api/call/${index}`);
-      modal.replaceChildren(
-        h(
-          "div",
-          { class: "box", role: "dialog", "aria-modal": "true", "aria-label": "Model call" },
-          h("header", { class: "inline" }, h("h2", { text: `${data.role} call ${data.i}` }), h("span", { class: "muted", text: `${data.model} · ${dur1(data.seconds)} · ${compact(data.prompt_tokens)} in, ${compact(data.completion_tokens)} out · ${data.finish || ""}` }), h("button", { class: "btn", type: "button", onclick: closeModal, text: "Close (Esc)" })),
-          ...data.messages.flatMap((m) => [h("h3", { text: m.role }), h("pre", { class: "block", text: m.content })]),
-          h("h3", { text: "reply" }),
-          h("pre", { class: "block", text: data.response }),
-        ),
+      showTranscript(
+        `${data.role} call ${data.i}`,
+        `${data.model} · ${dur1(data.seconds)} · ${compact(data.prompt_tokens)} in, ${compact(data.completion_tokens)} out · ${data.finish || ""}`,
+        data.messages,
+        data.response,
       );
-      modal.hidden = false;
     } catch (err) {
       S.error = err.message;
     }
@@ -1239,6 +1254,769 @@
     inputs.budget_hours.focus();
   }
 
+  // ---- live view: the models' replies as they are written ------------------------------
+
+  const ROLES = ["planner", "coder"];
+  const ROLE_TITLE = { planner: "Planner", coder: "Coder" };
+  const ROLE_ABOUT = {
+    planner: "Decides what to try next and summarizes each run.",
+    coder: "Writes and repairs the Python script.",
+  };
+  const STEP_LABEL = { choose: "Choose", plan: "Plan", code: "Code", run: "Run", grade: "Grade" };
+  const STEP_PHASES = new Set(["selecting", "writing", "running", "evaluating"]);
+
+  const PY_KEYWORDS = new Set(
+    "False None True and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield".split(" "),
+  );
+  const PY_BUILTINS = new Set("print len range int float str list dict set tuple bool enumerate zip map sum min max abs sorted open isinstance super self cls".split(" "));
+  const PY_WORD = /[A-Za-z_][A-Za-z0-9_]*/y;
+  const PY_NUMBER = /\d[\d_]*(?:\.\d*)?(?:[eE][+-]?\d+)?/y;
+  const PY_PLAIN = /[^A-Za-z0-9_#"'@]+/y;
+  const PY_DECORATOR = /@[A-Za-z_][\w.]*/y;
+  const PY_PREFIX = /^(?:[rRbBuUfF]|[rR][bBfF]|[bBfF][rR])$/;
+  const FENCE = /^\s*```(\w*)\s*$/;
+
+  const P = {}; // one pane per role
+  S.live = null;
+  S.liveEtag = null;
+  S.view = null;
+  S.codeCache = new Map(); // node id -> script, "" if unavailable, null while loading
+
+  const busy = () => {
+    const run = S.state && S.state.run;
+    return Boolean(run && (run.state === "running" || run.state === "starting"));
+  };
+
+  function matchAt(re, text, at) {
+    re.lastIndex = at;
+    const m = re.exec(text);
+    return m ? m[0] : null;
+  }
+
+  // Colors one line of Python. `open` is a triple quote left unclosed by an earlier line.
+  function pyTokens(line, open) {
+    const out = [];
+    const push = (cls, text) => {
+      if (text) out.push([cls, text]);
+    };
+    let i = 0;
+    let quote = open;
+    if (quote) {
+      const end = line.indexOf(quote);
+      if (end < 0) return { tokens: [["str", line]], open: quote };
+      push("str", line.slice(0, end + 3));
+      i = end + 3;
+      quote = "";
+    }
+    let afterDef = false;
+    while (i < line.length) {
+      const c = line[i];
+      if (c === "#") {
+        push("com", line.slice(i));
+        break;
+      }
+      if (c === '"' || c === "'") {
+        const triple = c.repeat(3);
+        if (line.startsWith(triple, i)) {
+          const end = line.indexOf(triple, i + 3);
+          if (end < 0) {
+            push("str", line.slice(i));
+            quote = triple;
+            break;
+          }
+          push("str", line.slice(i, end + 3));
+          i = end + 3;
+        } else {
+          let j = i + 1;
+          while (j < line.length && line[j] !== c) j += line[j] === "\\" ? 2 : 1;
+          push("str", line.slice(i, j + 1));
+          i = j + 1;
+        }
+      } else if (c >= "0" && c <= "9") {
+        const num = matchAt(PY_NUMBER, line, i);
+        push("num", num);
+        i += num.length;
+      } else if (/[A-Za-z_]/.test(c)) {
+        const word = matchAt(PY_WORD, line, i);
+        i += word.length;
+        const next = line[i];
+        if (PY_PREFIX.test(word) && (next === '"' || next === "'")) {
+          push("str", word);
+        } else if (afterDef) {
+          push("fn", word);
+          afterDef = false;
+        } else if (PY_KEYWORDS.has(word)) {
+          push("kw", word);
+          afterDef = word === "def" || word === "class";
+        } else {
+          push(PY_BUILTINS.has(word) ? "bi" : "", word);
+        }
+      } else if (c === "@" && out.every((t) => !t[1].trim())) {
+        const dec = matchAt(PY_DECORATOR, line, i) || "@";
+        push("dec", dec);
+        i += dec.length;
+      } else {
+        const plain = matchAt(PY_PLAIN, line, i) || c;
+        push("", plain);
+        i += plain.length;
+      }
+    }
+    return { tokens: out, open: quote };
+  }
+
+  const tokenSpans = (text, open) =>
+    pyTokens(text, open).tokens.map(([cls, t]) => (cls ? h("span", { class: `tk-${cls}`, text: t }) : t));
+
+  // Splits a reply into display lines: prose, fenced code (colored as Python) and the fences.
+  function parseLines(text) {
+    const out = [];
+    let fenced = false;
+    let open = "";
+    let no = 0;
+    for (const line of text.split("\n")) {
+      const fence = FENCE.exec(line);
+      if (fence && !fenced) {
+        fenced = true;
+        open = "";
+        no = 0;
+        out.push({ kind: "fence", text: fence[1] || "code", open: "", no: 0 });
+      } else if (fence) {
+        fenced = false;
+        out.push({ kind: "fence-end", text: "", open: "", no: 0 });
+      } else if (fenced) {
+        no += 1;
+        out.push({ kind: "code", text: line, open, no });
+        open = pyTokens(line, open).open;
+      } else {
+        out.push({ kind: "prose", text: line, open: "", no: 0 });
+      }
+    }
+    return out;
+  }
+
+  function renderLine(el, m) {
+    el.className = `ln ${m.kind}`;
+    if (m.kind === "code") {
+      el.replaceChildren(h("span", { class: "no", text: String(m.no) }), h("span", { class: "tx" }, ...tokenSpans(m.text, m.open)));
+    } else if (m.kind === "fence-end") {
+      el.replaceChildren();
+    } else {
+      el.replaceChildren(h("span", { class: "tx", text: m.text }));
+    }
+  }
+
+  // Only the lines that changed are touched, so text can stream in without the page flickering.
+  function paintLines(p, text, streaming) {
+    const models = text ? parseLines(text) : [];
+    const { els, keys } = p.lines;
+    models.forEach((m, i) => {
+      const key = `${m.kind}|${m.open}|${m.no}|${m.text}`;
+      if (!els[i]) {
+        els.push(h("div", {}));
+        keys.push("");
+        p.linesBox.append(els[i]);
+      }
+      if (keys[i] !== key) {
+        keys[i] = key;
+        renderLine(els[i], m);
+      }
+    });
+    while (els.length > models.length) {
+      els.pop().remove();
+      keys.pop();
+    }
+    if (streaming) {
+      const last = [...els].reverse().find((el) => !el.classList.contains("fence-end"));
+      const tx = last ? last.querySelector(".tx") : null;
+      (tx || p.linesBox).append(p.caret);
+    } else {
+      p.caret.remove();
+    }
+  }
+
+  function resetLines(p) {
+    p.lines.els.forEach((el) => el.remove());
+    p.lines.els.length = 0;
+    p.lines.keys.length = 0;
+    p.caret.remove();
+  }
+
+  function extractCode(text) {
+    const blocks = [];
+    const re = /```(?:python|py)?[ \t]*\n([\s\S]*?)```/g;
+    for (let m = re.exec(text); m; m = re.exec(text)) blocks.push(m[1]);
+    if (!blocks.length) return "";
+    return blocks.reduce((a, b) => (b.length > a.length ? b : a)).trim() + "\n";
+  }
+
+  const splitLines = (code) => code.replace(/\n$/, "").split("\n");
+
+  // Line diff of two scripts: [{t: " " | "+" | "-", x: line}].
+  function diffLines(a, b) {
+    let head = 0;
+    while (head < a.length && head < b.length && a[head] === b[head]) head += 1;
+    let tail = 0;
+    while (tail < a.length - head && tail < b.length - head && a[a.length - 1 - tail] === b[b.length - 1 - tail]) tail += 1;
+    const A = a.slice(head, a.length - tail);
+    const B = b.slice(head, b.length - tail);
+    const out = [];
+    for (let k = 0; k < head; k++) out.push({ t: " ", x: a[k] });
+    if (A.length * B.length > 4e6) {
+      A.forEach((x) => out.push({ t: "-", x }));
+      B.forEach((x) => out.push({ t: "+", x }));
+    } else {
+      const w = B.length + 1;
+      const lcs = new Uint16Array((A.length + 1) * w);
+      for (let i = A.length - 1; i >= 0; i--) {
+        for (let j = B.length - 1; j >= 0; j--) {
+          lcs[i * w + j] = A[i] === B[j] ? lcs[(i + 1) * w + j + 1] + 1 : Math.max(lcs[(i + 1) * w + j], lcs[i * w + j + 1]);
+        }
+      }
+      let i = 0;
+      let j = 0;
+      while (i < A.length && j < B.length) {
+        if (A[i] === B[j]) {
+          out.push({ t: " ", x: A[i] });
+          i += 1;
+          j += 1;
+        } else if (lcs[(i + 1) * w + j] >= lcs[i * w + j + 1]) {
+          out.push({ t: "-", x: A[i] });
+          i += 1;
+        } else {
+          out.push({ t: "+", x: B[j] });
+          j += 1;
+        }
+      }
+      for (; i < A.length; i++) out.push({ t: "-", x: A[i] });
+      for (; j < B.length; j++) out.push({ t: "+", x: B[j] });
+    }
+    for (let k = a.length - tail; k < a.length; k++) out.push({ t: " ", x: a[k] });
+    return out;
+  }
+
+  // The changes with three lines of context; long unchanged stretches fold into one line.
+  function renderDiff(box, oldCode, newCode, parentId) {
+    const rows = diffLines(splitLines(oldCode), splitLines(newCode));
+    const keep = new Array(rows.length).fill(false);
+    rows.forEach((r, i) => {
+      if (r.t === " ") return;
+      for (let k = Math.max(0, i - 3); k <= Math.min(rows.length - 1, i + 3); k++) keep[k] = true;
+    });
+    const added = rows.filter((r) => r.t === "+").length;
+    const removed = rows.filter((r) => r.t === "-").length;
+    const kids = [h("div", { class: "diff-sum", text: added || removed ? `Against ${parentId}: ${added} lines added, ${removed} removed.` : `Identical to ${parentId}.` })];
+    let line = 0;
+    let skipped = 0;
+    const fold = () => {
+      if (skipped) kids.push(h("div", { class: "ln gap", text: `… ${skipped} unchanged line${skipped === 1 ? "" : "s"}` }));
+      skipped = 0;
+    };
+    rows.forEach((r, i) => {
+      if (r.t !== "-") line += 1;
+      if (!keep[i]) {
+        skipped += 1;
+        return;
+      }
+      fold();
+      const kind = r.t === "+" ? "add" : r.t === "-" ? "del" : "ctx";
+      kids.push(
+        h(
+          "div",
+          { class: `ln diff ${kind}` },
+          h("span", { class: "no", text: r.t === "-" ? "" : String(line) }),
+          h("span", { class: "sign", text: r.t === "+" ? "+" : r.t === "-" ? "−" : "" }),
+          h("span", { class: "tx" }, ...tokenSpans(r.x, "")),
+        ),
+      );
+    });
+    fold();
+    box.replaceChildren(...kids);
+  }
+
+  async function loadParentCode(id) {
+    if (S.codeCache.has(id)) return;
+    S.codeCache.set(id, null);
+    try {
+      const { data } = await get(`/api/node/${id}`);
+      S.codeCache.set(id, data.code || "");
+    } catch (err) {
+      S.codeCache.set(id, "");
+    }
+  }
+
+  // What a pane shows: the call being written, or a finished call picked from the rail.
+  function paneData(p) {
+    if (p.replay) {
+      const d = p.replay.data;
+      return {
+        id: `replay-${d.i}`, replay: true, index: d.i, ts: d.ts, model: d.model, purpose: "", node: null, operator: null,
+        parent: null, thinking: "", answer: d.response || "", done: true, ok: true, chunks: d.completion_tokens || 0,
+        started_at: null, first_at: null, updated_at: null, seconds: d.seconds,
+      };
+    }
+    const rec = S.live && S.live.calls[p.role];
+    return rec ? { ...rec, replay: false, seconds: null } : null;
+  }
+
+  function syncTools(p) {
+    p.followBtn.setAttribute("aria-pressed", String(p.follow));
+    p.wrapBtn.setAttribute("aria-pressed", String(p.wrap));
+    p.diffBtn.setAttribute("aria-pressed", String(p.diff));
+    p.root.classList.toggle("wrap", p.wrap);
+    p.backBtn.hidden = !p.replay;
+  }
+
+  const scrollEnd = (p) => {
+    p.body.scrollTop = p.body.scrollHeight;
+  };
+
+  function copyPane(p) {
+    const d = paneData(p);
+    if (!d) return;
+    const text = (p.role === "coder" && extractCode(d.answer)) || d.answer;
+    if (!navigator.clipboard) {
+      toast("This browser does not allow copying from here.");
+      return;
+    }
+    navigator.clipboard.writeText(text).then(
+      () => toast("Copied."),
+      () => toast("Copying was blocked by the browser."),
+    );
+  }
+
+  async function openPrompt(p) {
+    if (p.replay) {
+      openCall(p.replay.i);
+      return;
+    }
+    try {
+      const { data } = await get(`/api/live/prompt/${p.role}`);
+      showTranscript(`${ROLE_TITLE[p.role]} prompt`, `what the ${p.role} was sent for this call`, data.messages, null);
+    } catch (err) {
+      toast("No prompt has been recorded for this call yet.");
+    }
+  }
+
+  function backToLive(p) {
+    p.replay = null;
+    renderPane(p.role);
+    renderRail();
+  }
+
+  async function openReplay(index) {
+    try {
+      const { data } = await get(`/api/call/${index}`);
+      const p = P[data.role];
+      if (!p) {
+        openCall(index);
+        return;
+      }
+      p.replay = { i: index, data };
+      renderPane(data.role);
+      renderRail();
+    } catch (err) {
+      toast(err.message);
+    }
+  }
+
+  function buildPane(role) {
+    const p = {
+      role,
+      root: $(`#pane-${role}`),
+      lines: { els: [], keys: [] },
+      follow: true,
+      wrap: role === "planner",
+      diff: false,
+      diffKey: "",
+      replay: null,
+      id: null,
+      touched: false,
+      caret: h("span", { class: "caret", "aria-hidden": "true" }),
+    };
+    P[role] = p;
+
+    const tool = (label, onclick, toggle) => h("button", { class: "chip", type: "button", "aria-pressed": toggle ? "false" : null, text: label, onclick });
+    p.model = h("span", { class: "muted" });
+    p.badge = h("span", { class: "badge" });
+    p.meta = h("div", { class: "pane-meta" });
+    p.followBtn = tool(
+      "Follow",
+      () => {
+        p.follow = !p.follow;
+        if (p.follow) scrollEnd(p);
+        syncTools(p);
+      },
+      true,
+    );
+    p.wrapBtn = tool(
+      "Wrap lines",
+      () => {
+        p.wrap = !p.wrap;
+        syncTools(p);
+      },
+      true,
+    );
+    p.diffBtn = tool(
+      "Changes",
+      () => {
+        p.diff = !p.diff;
+        p.diffKey = "";
+        renderPane(role);
+      },
+      true,
+    );
+    p.copyBtn = tool("Copy", () => copyPane(p), false);
+    p.promptBtn = tool("Prompt", () => openPrompt(p), false);
+    p.backBtn = tool("Back to live", () => backToLive(p), false);
+    p.diffBtn.hidden = true;
+    p.backBtn.hidden = true;
+
+    p.thinkSummary = h("summary", {
+      onclick: () => {
+        p.touched = true;
+      },
+    });
+    p.thinkText = h("pre", {});
+    p.think = h("details", { class: "think", hidden: true }, p.thinkSummary, p.thinkText);
+
+    p.empty = h("div", { class: "empty-pane" });
+    p.linesBox = h("div", {});
+    p.diffBox = h("div", { hidden: true });
+    p.body = h("div", { class: "pane-body", role: "log", "aria-live": "off", "aria-label": `${ROLE_TITLE[role]} output`, tabindex: 0 }, p.empty, p.linesBox, p.diffBox);
+    p.body.addEventListener("scroll", () => {
+      const atEnd = p.body.scrollHeight - p.body.scrollTop - p.body.clientHeight < 40;
+      if (atEnd !== p.follow) {
+        p.follow = atEnd;
+        syncTools(p);
+      }
+    });
+
+    p.root.replaceChildren(
+      h(
+        "header",
+        { class: "pane-head" },
+        h("div", { class: "pane-title" }, h("h2", { id: `h-pane-${role}`, text: ROLE_TITLE[role] }), p.model, p.badge),
+        p.meta,
+        h("div", { class: "pane-tools" }, p.followBtn, p.wrapBtn, p.diffBtn, p.copyBtn, p.promptBtn, p.backBtn),
+      ),
+      p.think,
+      p.body,
+    );
+    syncTools(p);
+  }
+
+  // The header line of a pane: model, state, and how much has been written so far.
+  function paneHead(p, d, streaming) {
+    const run = S.state ? S.state.run : null;
+    const params = (run && run.params) || {};
+    p.model.textContent = (d && d.model) || params[`${p.role}_model`] || "";
+
+    let glyph = "○";
+    let cls = "never";
+    let text = busy() ? "waiting" : "idle";
+    if (d && d.replay) {
+      [glyph, cls, text] = ["↺", "never", `replay of call #${d.index}`];
+    } else if (streaming && !d.chunks) {
+      [glyph, cls, text] = ["…", "starting", `waiting for the first token · ${dur1(nowSec() - d.started_at)}`];
+    } else if (streaming) {
+      [glyph, cls, text] = ["●", "running pulse", `writing · ${dur1(nowSec() - d.started_at)}`];
+    } else if (d && d.done && d.ok) {
+      [glyph, cls, text] = ["✓", "ok", `done in ${dur1(d.updated_at - d.started_at)}`];
+    } else if (d && d.done) {
+      [glyph, cls, text] = ["✕", "dead", "the call failed"];
+    } else if (d) {
+      [glyph, cls, text] = ["■", "stopped", "interrupted"];
+    }
+    p.badge.replaceChildren(h("span", { class: `glyph ${cls}`, "aria-hidden": "true", text: glyph }), text);
+
+    const parts = [];
+    if (!d) {
+      parts.push(ROLE_ABOUT[p.role]);
+    } else {
+      if (d.replay) parts.push(`${clock(d.ts)} · ${d.model}`);
+      if (d.purpose) parts.push(d.purpose);
+      if (d.node) parts.push(`${d.node}${d.operator ? " · " + d.operator : ""}${d.parent ? " ← " + d.parent : ""}`);
+      parts.push(`${compact(d.chunks)} tokens`);
+      const took = d.replay ? d.seconds : d.first_at ? d.updated_at - d.first_at : 0;
+      if (d.chunks && took > 0) parts.push(`${(d.chunks / took).toFixed(1)} tok/s`);
+      const chars = (d.answer || "").length + (d.thinking || "").length;
+      parts.push(`${(chars / 1024).toFixed(1)} KB`);
+    }
+    p.meta.replaceChildren(...parts.map((t) => h("span", { text: t })));
+  }
+
+  function renderPane(role) {
+    const p = P[role];
+    const d = paneData(p);
+    const streaming = Boolean(d && !d.replay && !d.done && busy());
+
+    if ((d ? d.id : null) !== p.id) {
+      p.id = d ? d.id : null;
+      p.touched = false;
+      p.diff = false;
+      p.diffKey = "";
+      p.follow = !d || !d.done; // a finished reply is read from the top
+      resetLines(p);
+      p.body.scrollTop = 0;
+    }
+    p.root.classList.toggle("streaming", streaming);
+    paneHead(p, d, streaming);
+
+    const thinking = d ? d.thinking : "";
+    p.think.hidden = !thinking;
+    if (thinking) {
+      p.thinkSummary.textContent = `Reasoning · ${compact(thinking.length)} characters`;
+      p.thinkText.textContent = thinking;
+      if (!p.touched) p.think.open = streaming && !d.answer;
+      if (p.think.open) p.thinkText.scrollTop = p.thinkText.scrollHeight;
+    }
+
+    const answer = d ? d.answer : "";
+    const code = role === "coder" && d && !d.replay && d.done ? extractCode(answer) : "";
+    const canDiff = Boolean(code && d.parent);
+    if (!canDiff) p.diff = false;
+    p.diffBtn.hidden = !canDiff;
+    if (canDiff) p.diffBtn.textContent = p.diff ? "Show full reply" : `Changes vs ${d.parent}`;
+    const showDiff = p.diff && canDiff;
+    p.diffBox.hidden = !showDiff;
+    p.linesBox.hidden = showDiff;
+
+    if (!answer && !(thinking && streaming)) {
+      p.empty.textContent = !d
+        ? busy()
+          ? `Nothing from the ${role} yet. It appears here as the model writes.`
+          : `No ${role} output in this workspace yet.`
+        : streaming
+          ? "Waiting for the model to start writing…"
+          : "The model returned nothing.";
+      p.empty.hidden = false;
+    } else {
+      p.empty.hidden = true;
+    }
+
+    if (showDiff) {
+      const old = S.codeCache.get(d.parent);
+      const key = `${d.id}|${d.parent}`;
+      if (old == null) {
+        p.diffBox.replaceChildren(h("div", { class: "empty-pane", text: `Loading ${d.parent}…` }));
+        p.diffKey = "";
+        if (old === undefined) loadParentCode(d.parent).then(() => renderPane(role));
+      } else if (!old) {
+        p.diffBox.replaceChildren(h("div", { class: "empty-pane", text: `The script of ${d.parent} is not available.` }));
+      } else if (p.diffKey !== key) {
+        p.diffKey = key;
+        renderDiff(p.diffBox, old, code, d.parent);
+      }
+    } else {
+      paintLines(p, answer, streaming);
+      if (p.follow) scrollEnd(p);
+    }
+    syncTools(p);
+  }
+
+  // ---- the step in progress, the call rail, tabs ----------------------------------------
+
+  function stepStages(run) {
+    const steps = run.operator === "debug" ? ["choose", "code", "run", "grade"] : ["choose", "plan", "code", "run", "grade"];
+    const coder = S.live && S.live.calls.coder;
+    const coding = Boolean(coder && coder.node === run.node && coder.started_at >= run.phase_since - 1);
+    const now = {
+      selecting: "choose",
+      writing: run.operator === "debug" || coding ? "code" : "plan",
+      running: "run",
+      evaluating: "grade",
+    }[run.phase];
+    return { steps, active: steps.indexOf(now) };
+  }
+
+  function stepTook(name, run) {
+    const rec = S.live && S.live.calls[name === "plan" ? "planner" : "coder"];
+    if (!["plan", "code"].includes(name) || !rec || rec.node !== run.node || !rec.done) return "";
+    if (name === "plan" && !String(rec.purpose).startsWith("plan")) return "";
+    return dur1(rec.updated_at - rec.started_at);
+  }
+
+  function renderPipeline() {
+    const box = $("#pipeline");
+    const run = S.state ? S.state.run : null;
+    if (!run || run.state !== "running" || !STEP_PHASES.has(run.phase)) {
+      box.hidden = true;
+      box.replaceChildren();
+      return;
+    }
+    const { steps, active } = stepStages(run);
+    box.hidden = false;
+    box.replaceChildren(
+      ...steps.map((name, i) => {
+        const state = i < active ? "done" : i === active ? "active" : "pending";
+        const took = stepTook(name, run);
+        return h(
+          "li",
+          { class: state, "aria-current": state === "active" ? "step" : null },
+          h("span", { class: "ico" + (state === "active" ? " pulse" : ""), "aria-hidden": "true", text: state === "done" ? "✓" : state === "active" ? "●" : "" }),
+          STEP_LABEL[name],
+          took ? h("span", { class: "took", text: took }) : null,
+        );
+      }),
+    );
+  }
+
+  function renderStepHead() {
+    const box = $("#step-head");
+    const run = S.state ? S.state.run : null;
+    if (!(run && run.state === "running" && run.node)) {
+      box.replaceChildren(h("span", { class: "muted", text: nowText() }));
+      return;
+    }
+    const parent = run.parent ? S.state.nodes.find((d) => d.id === run.parent) : null;
+    box.replaceChildren(
+      h("span", { class: "inline big" }, h("span", { class: `mark bg-${op(run.operator)}` }), run.node),
+      h("span", { class: "muted", text: run.operator }),
+      parent
+        ? h("span", { class: "muted", text: `builds on ${parent.id}${parent.cv != null ? ` (score ${f4(parent.cv)})` : ""}` })
+        : run.operator === "draft"
+          ? h("span", { class: "muted", text: "a new starting point" })
+          : null,
+    );
+  }
+
+  function allLive() {
+    for (const role of ROLES) {
+      P[role].replay = null;
+      renderPane(role);
+    }
+    renderRail();
+  }
+
+  function renderRail() {
+    const replaying = (c) => ROLES.some((r) => P[r].replay && P[r].replay.i === c.i);
+    const recent = S.calls.slice(-16).reverse();
+    $("#rail").replaceChildren(
+      h("button", { class: "chip", type: "button", "aria-pressed": String(!ROLES.some((r) => P[r].replay)), text: "live", onclick: allLive }),
+      ...recent.map((c) =>
+        h(
+          "button",
+          { class: "chip", type: "button", "aria-pressed": String(replaying(c)), title: `${c.model} · ${compact(c.prompt_tokens)} tokens in`, onclick: () => openReplay(c.i) },
+          h("span", { class: "muted", text: `#${c.i}` }),
+          c.role,
+          h("span", { class: "muted", text: `${dur1(c.seconds)} · ${compact(c.completion_tokens)} tok` }),
+        ),
+      ),
+      recent.length ? null : h("span", { class: "muted", text: "No finished call yet." }),
+    );
+  }
+
+  function renderTabs() {
+    const run = S.state ? S.state.run : null;
+    $("#tab-dot").hidden = !(run && run.state === "running" && run.llm);
+  }
+
+  function renderLive() {
+    if (S.view !== "live" || !S.state || !P.planner) return;
+    safely(renderStepHead);
+    safely(renderPipeline);
+    for (const role of ROLES) safely(() => renderPane(role));
+    safely(renderRail);
+    safely(renderLiveFeed);
+  }
+
+  // Once a second, so the elapsed times of a call in flight move between model updates.
+  function renderLiveClock() {
+    if (S.view !== "live" || !S.state || !P.planner) return;
+    for (const role of ROLES) {
+      const d = paneData(P[role]);
+      if (d && !d.replay && !d.done && busy()) paneHead(P[role], d, true);
+    }
+  }
+
+  // ---- live polling and the view switch ---------------------------------------------------
+
+  let liveTimer = 0;
+  let liveBusy = false;
+
+  function liveWriting() {
+    const run = S.state && S.state.run;
+    if (!run || run.state !== "running") return false;
+    return Boolean(run.llm || (S.live && ROLES.some((r) => S.live.calls[r] && !S.live.calls[r].done)));
+  }
+
+  async function liveTick() {
+    if (liveBusy) return;
+    liveBusy = true;
+    let delay = 1000;
+    if (S.view === "live" && !document.hidden) {
+      try {
+        const res = await get("/api/live", S.liveEtag);
+        if (!res.same) {
+          S.live = res.data;
+          S.liveEtag = res.etag;
+          safely(renderLive);
+        }
+        delay = liveWriting() ? 350 : 1500;
+      } catch (err) {
+        delay = 3000; // the main poll reports being offline
+      }
+    }
+    liveBusy = false;
+    liveTimer = setTimeout(liveTick, delay);
+  }
+
+  function liveNow() {
+    S.liveEtag = null;
+    clearTimeout(liveTimer);
+    liveTick();
+  }
+
+  function applyView() {
+    const live = S.view === "live";
+    $("#view-live").hidden = !live;
+    $("#view-overview").hidden = live;
+    for (const name of ["live", "overview"]) {
+      const tab = $(`#tab-${name}`);
+      const on = (name === "live") === live;
+      tab.setAttribute("aria-selected", String(on));
+      tab.tabIndex = on ? 0 : -1;
+    }
+  }
+
+  function setView(view, remember) {
+    S.view = view;
+    applyView();
+    if (remember) {
+      try {
+        localStorage.setItem("kagent-view", view);
+      } catch (err) {
+        /* not persisted */
+      }
+    }
+    if (view === "live") {
+      renderLive();
+      liveNow();
+    } else if (S.state) {
+      renderBody(); // the charts measure their width, which is zero while the view is hidden
+    }
+  }
+
+  function initLive() {
+    ROLES.forEach(buildPane);
+    $("#tab-live").addEventListener("click", () => setView("live", true));
+    $("#tab-overview").addEventListener("click", () => setView("overview", true));
+    $(".views").addEventListener("keydown", (ev) => {
+      if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+      setView(S.view === "live" ? "overview" : "live", true);
+      $(`#tab-${S.view}`).focus();
+      ev.preventDefault();
+    });
+    try {
+      const saved = localStorage.getItem("kagent-view");
+      if (saved === "live" || saved === "overview") S.view = saved;
+    } catch (err) {
+      /* the first state decides */
+    }
+    applyView();
+    liveTick();
+  }
+
   // ---- polling and boot ----------------------------------------------------------------
 
   function safely(fn) {
@@ -1250,6 +2028,7 @@
   }
 
   function renderBody() {
+    if (S.view === "live") return;
     for (const fn of [renderKpis, renderTimeline, renderGains, renderFunnel, renderTree, renderTable, renderLlm, renderSide]) safely(fn);
     S.seenNodes = S.state.nodes.length;
   }
@@ -1259,6 +2038,8 @@
     safely(renderRunButtons);
     safely(renderFilters);
     renderBody();
+    safely(renderLive);
+    safely(renderTabs);
     safely(renderClock);
   }
 
@@ -1283,6 +2064,7 @@
       S.calls = S.calls.concat(data.calls).slice(-200);
       S.callLast = data.last;
       safely(renderLlm);
+      safely(renderRail);
     }
     if (st.run_log_size !== S.consoleSize) await renderConsole();
   }
@@ -1304,6 +2086,11 @@
         S.state = res.data;
         S.etag = res.etag;
         S.skew = res.data.server_time - Date.now() / 1000;
+        if (!S.view) {
+          S.view = busy() ? "live" : "overview"; // a saved choice wins; otherwise follow the search
+          applyView();
+          if (S.view === "live") liveNow();
+        }
         renderAll();
         await pull();
         if (S.selected) await loadDrawer();
@@ -1317,6 +2104,7 @@
     polling = false;
     safely(renderClock);
     safely(renderRunButtons);
+    safely(renderTabs);
     pollTimer = setTimeout(tick, document.hidden ? 10 * POLL_MS : POLL_MS);
   }
 
@@ -1355,7 +2143,7 @@
   window.addEventListener("resize", () => {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
-      if (!S.state) return;
+      if (!S.state || S.view === "live") return;
       safely(renderTimeline);
       safely(renderGains);
       safely(renderFunnel);
@@ -1367,6 +2155,10 @@
   safely(renderRunButtons);
   initTheme();
   buildFilters();
+  initLive();
   tick();
-  setInterval(() => safely(renderClock), 1000);
+  setInterval(() => {
+    safely(renderClock);
+    safely(renderLiveClock);
+  }, 1000);
 })();

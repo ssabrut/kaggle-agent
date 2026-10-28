@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from kagent.llm.client import ChatClient, LLMError, strip_thinking
+from kagent.llm.client import ChatClient, LLMError, split_thinking, strip_thinking
 
 
 def _client(handler, **kwargs):
@@ -112,3 +112,152 @@ def test_trajectory_is_logged(tmp_path):
     assert entries[0]["model"] == "model-x"
     assert entries[0]["messages"] == [{"role": "user", "content": "q"}]
     assert entries[0]["response"] == "done"
+
+
+# --- streaming ----------------------------------------------------------------------------------
+
+
+STREAM = {"content-type": "text/event-stream"}
+
+
+def _frames(*events):
+    return "".join(f"data: {e if isinstance(e, str) else json.dumps(e)}\n\n" for e in events)
+
+
+def _sse(*events):
+    return httpx.Response(200, content=_frames(*events).encode(), headers=STREAM)
+
+
+def _delta(content=None, reasoning=None, finish=None):
+    delta = {}
+    if content is not None:
+        delta["content"] = content
+    if reasoning is not None:
+        delta["reasoning"] = reasoning
+    return {"choices": [{"delta": delta, "finish_reason": finish}]}
+
+
+class Watcher:
+    """An observer that keeps everything it is told."""
+
+    def __init__(self):
+        self.started, self.updates, self.ended = [], [], []
+
+    def call_started(self, role, **info):
+        self.started.append((role, info))
+
+    def call_progress(self, role, **update):
+        self.updates.append(update)
+
+    def call_finished(self, role, *, ok=True):
+        self.ended.append(ok)
+
+
+def _stream_client(handler, watcher, **kwargs):
+    return _client(handler, observer=watcher, push_every=0, **kwargs)[0]
+
+
+def test_a_streamed_reply_is_assembled_and_shown_as_it_grows(tmp_path):
+    log = tmp_path / "trajectory.jsonl"
+    usage = {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 3}}
+
+    def handler(request):
+        body = json.loads(request.content)
+        assert body["stream"] is True and body["stream_options"] == {"include_usage": True}
+        events = [_delta("Hel"), _delta("lo"), _delta("!", finish="stop"), usage, "[DONE]"]
+        return _sse(*events)
+
+    watcher = Watcher()
+    client = _stream_client(handler, watcher, log_path=log)
+
+    assert client.chat([{"role": "user", "content": "q"}], purpose="greet") == "Hello!"
+
+    answers = [u["answer"] for u in watcher.updates]
+    assert answers[0] == "Hel" and answers[-1] == "Hello!"
+    assert [len(a) for a in answers] == sorted(len(a) for a in answers)
+    role, info = watcher.started[0]
+    assert (role, info["model"], info["purpose"]) == ("coder", "model-x", "greet")
+    assert info["messages"] == [{"role": "user", "content": "q"}]
+    assert watcher.ended == [True]
+    entry = json.loads(log.read_text())
+    assert entry["usage"] == {"prompt_tokens": 5, "completion_tokens": 3}
+    assert (entry["response"], entry["finish_reason"]) == ("Hello!", "stop")
+
+
+def test_reasoning_is_shown_apart_from_the_answer():
+    events = [_delta(reasoning="weigh "), _delta(reasoning="options"), _delta("pick B"), "[DONE]"]
+    watcher = Watcher()
+    client = _stream_client(lambda request: _sse(*events), watcher)
+
+    assert client.chat([{"role": "user", "content": "q"}]) == "pick B"
+
+    last = watcher.updates[-1]
+    assert (last["thinking"], last["answer"]) == ("weigh options", "pick B")
+
+
+def test_inline_think_tags_are_split_while_streaming():
+    events = [_delta("<think>plan"), _delta(" it</think>"), _delta("done"), "[DONE]"]
+    watcher = Watcher()
+    client = _stream_client(lambda request: _sse(*events), watcher)
+
+    assert client.chat([{"role": "user", "content": "q"}]) == "done"
+
+    assert (watcher.updates[0]["thinking"], watcher.updates[0]["answer"]) == ("plan", "")
+    assert (watcher.updates[-1]["thinking"], watcher.updates[-1]["answer"]) == ("plan it", "done")
+
+
+def test_without_a_usage_report_the_chunk_count_stands_in(tmp_path):
+    log = tmp_path / "trajectory.jsonl"
+    client, _ = _client(lambda r: _sse(_delta("a"), _delta("b"), "[DONE]"), log_path=log)
+    client.chat([{"role": "user", "content": "q"}])
+    assert json.loads(log.read_text())["usage"] == {"completion_tokens": 2}
+
+
+def test_an_error_event_in_the_stream_is_an_llm_error():
+    watcher = Watcher()
+    events = [_delta("a"), {"error": {"message": "out of memory"}}]
+    client = _stream_client(lambda request: _sse(*events), watcher)
+    with pytest.raises(LLMError, match="out of memory"):
+        client.chat([{"role": "user", "content": "q"}])
+    assert watcher.ended == [False]
+
+
+def test_events_that_are_not_data_are_ignored():
+    noise = ": keep-alive\n\nevent: ping\n\ndata: not json\n\n"
+    content = (noise + _frames(_delta("ok"), "[DONE]")).encode()
+    response = httpx.Response(200, content=content, headers=STREAM)
+    client, _ = _client(lambda request: response)
+    assert client.chat([{"role": "user", "content": "q"}]) == "ok"
+
+
+def test_a_server_that_ignores_stream_still_shows_its_reply():
+    watcher = Watcher()
+    client = _stream_client(lambda request: _reply("whole reply"), watcher)
+
+    assert client.chat([{"role": "user", "content": "q"}]) == "whole reply"
+
+    assert watcher.updates[-1]["answer"] == "whole reply"
+    assert watcher.ended == [True]
+
+
+def test_an_observer_is_told_when_the_call_fails():
+    watcher = Watcher()
+    client = _stream_client(lambda request: httpx.Response(400, text="bad model"), watcher)
+    with pytest.raises(LLMError):
+        client.chat([{"role": "user", "content": "q"}])
+    assert watcher.ended == [False] and watcher.updates == []
+
+
+@pytest.mark.parametrize(
+    ("raw", "thinking", "answer"),
+    [
+        ("<think>plan it</think>answer", "plan it", "answer"),
+        ("a<think>one</think>b<think>two</think>c", "one\ntwo", "abc"),
+        ("reasoning that never opened</think>answer", "reasoning that never opened", "answer"),
+        ("answer<think>cut off mid-thought", "cut off mid-thought", "answer"),
+        ("plain", "", "plain"),
+        ("", "", ""),
+    ],
+)
+def test_split_thinking(raw, thinking, answer):
+    assert split_thinking(raw) == (thinking, answer)

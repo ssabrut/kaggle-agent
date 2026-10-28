@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 
 from pydantic import ValidationError
 
-from kagent.dashboard.launch import LaunchError, Launcher, RunRequest
+from kagent.dashboard.launch import Launcher, LaunchError, RunRequest
 from kagent.dashboard.reader import WorkspaceReader, json_safe
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -135,6 +135,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(304, b"", "application/json", {**NO_CACHE, "ETag": etag})
             else:
                 self._json(reader.state(), headers={"ETag": etag})
+        elif path == "/api/live":
+            etag = '"' + hashlib.sha1(reader.live_fingerprint().encode()).hexdigest()[:16] + '"'
+            if self.headers.get("If-None-Match") == etag:
+                self._send(304, b"", "application/json", {**NO_CACHE, "ETag": etag})
+            else:
+                self._json(reader.live(), headers={"ETag": etag})
+        elif path.startswith("/api/live/prompt/"):
+            self._found(reader.live_prompt(path.removeprefix("/api/live/prompt/")))
         elif path == "/api/events":
             self._json(reader.events(int(query.get("after", ["0"])[0])))
         elif path == "/api/calls":

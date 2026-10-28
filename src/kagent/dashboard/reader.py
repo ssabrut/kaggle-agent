@@ -37,6 +37,7 @@ MESSAGE_CHARS = 20_000
 RECENT_LATENCIES = 80
 MAX_EVENTS = 300
 MAX_CALLS = 100
+LIVE_ROLES = ("planner", "coder")  # the roles the live view has a pane for
 
 
 def pid_alive(pid: Any) -> bool:
@@ -462,6 +463,39 @@ class WorkspaceReader:
             self._calls.refresh()
             rows = [r for r in self._calls.rows if r["i"] > after]
             return {"calls": rows[-MAX_CALLS:], "last": rows[-1]["i"] if rows else after}
+
+    def live_fingerprint(self) -> str:
+        """Changes whenever a reply being written gains text or a new call starts."""
+        parts = []
+        for role in LIVE_ROLES:
+            try:
+                stat = (self.ws.search_dir / "live" / f"{role}.json").stat()
+                parts.append(f"{stat.st_mtime_ns}:{stat.st_size}")
+            except OSError:
+                parts.append("-")
+        return "|".join(parts)
+
+    def live(self) -> dict:
+        """The model call in flight for each role, or the last one finished, with its text."""
+        calls = {}
+        for role in LIVE_ROLES:
+            record = self._json_file(self.ws.search_dir / "live" / f"{role}.json")
+            calls[role] = record or None
+        return {"server_time": time.time(), "calls": calls}
+
+    def live_prompt(self, role: str) -> dict | None:
+        """What a role's latest call was sent. The role is checked, never used as a path."""
+        if role not in LIVE_ROLES:
+            return None
+        data = self._json_file(self.ws.search_dir / "live" / f"{role}.prompt.json")
+        if not data:
+            return None
+        messages = [
+            {"role": m.get("role"), "content": _truncate(m.get("content") or "")}
+            for m in data.get("messages") or []
+            if isinstance(m, dict)
+        ]
+        return {"id": data.get("id"), "role": role, "messages": messages}
 
     def call(self, index: int) -> dict | None:
         with self._lock:

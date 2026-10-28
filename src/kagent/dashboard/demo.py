@@ -57,6 +57,79 @@ class Step:
 
 MEMORY = _trace(22, "X = pd.get_dummies(df, sparse=False)", "MemoryError")
 
+SCRIPT_TEMPLATE = '''# PLAN: __PLAN__
+import numpy as np
+import pandas as pd
+from lightgbm import LGBMClassifier
+
+DATA = "/data"
+SEED = 42
+
+
+def load():
+    train = pd.read_csv(f"{DATA}/train.csv")
+    folds = pd.read_csv(f"{DATA}/folds.csv")
+    print("STAGE: load")
+    return train.merge(folds, on="PassengerId")
+
+
+def features(df):
+    """Split Cabin into deck, number and side, and add the spend total."""
+    parts = df["Cabin"].str.split("/", expand=True)
+    df["deck"], df["num"], df["side"] = parts[0], parts[1], parts[2]
+    spend = ["RoomService", "FoodCourt", "ShoppingMall", "Spa", "VRDeck"]
+    df["spend"] = df[spend].fillna(0).sum(axis=1)  # a missing amount means no spending
+    print("STAGE: features")
+    return df
+
+
+def main():
+    df = features(load())
+    cols = [c for c in df.columns if c not in ("Transported", "fold")]
+    scores = []
+    for fold in sorted(df["fold"].unique()):
+        valid = df["fold"] == fold
+        model = LGBMClassifier(n_estimators=500, learning_rate=0.05, random_state=SEED)
+        model.fit(df.loc[~valid, cols], df.loc[~valid, "Transported"])
+        scores.append(model.score(df.loc[valid, cols], df.loc[valid, "Transported"]))
+    print(f"cv accuracy: {np.mean(scores):.4f} +- {np.std(scores):.4f}")
+    print("STAGE: cv")
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def script_text(step: Step) -> str:
+    return SCRIPT_TEMPLATE.replace("__PLAN__", step.plan)
+
+
+def plan_text(step: Step) -> str:
+    where = f"on top of {step.parent}" if step.parent else "as a fresh starting point"
+    return (
+        f"Idea: {step.plan}.\n\n"
+        f"Why: this builds {where} and changes one thing, so a score change can be read.\n"
+        "Steps:\n"
+        "1. Keep the data loading and the fold split from folds.csv unchanged.\n"
+        f"2. Apply the change: {step.plan}.\n"
+        "3. Report accuracy per fold and write oof.csv and submission.csv.\n"
+        "Risk: more features can overfit, so watch the spread between folds."
+    )
+
+
+def reasoning_text(step: Step) -> str:
+    base = step.parent or "nothing yet"
+    return (
+        f"The search has {base} to build on. The plan is: {step.plan}. "
+        "One change at a time keeps the score difference readable against the fold noise. "
+        "The script must still read folds.csv and write both oof.csv and submission.csv."
+    )
+
+
+def _reply(step: Step) -> str:
+    return f"Here is the script:\n\n```python\n{script_text(step)}```\n"
+
 # fmt: off
 SCRIPT = [
     Step("draft", None, "ok", "logistic regression on one-hot features", 0.7861, 0.0071,
@@ -123,17 +196,23 @@ class DemoRun:
 
     # -- writing what a real search would have written -------------------------------------
 
-    def _call(self, role: str, seconds: float, when: datetime, text: str) -> None:
+    @staticmethod
+    def _messages(role: str, text: str) -> list[dict[str, str]]:
+        return [
+            {"role": "system", "content": f"You are the {role}."},
+            {"role": "user", "content": f"(demo prompt) {text}"},
+        ]
+
+    def _call(
+        self, role: str, seconds: float, when: datetime, text: str, response: str | None = None
+    ) -> None:
         prompt_tokens = self.rng.randint(2500, 6500)
         entry = {
             "ts": when.isoformat(),
             "role": role,
             "model": PLANNER if role == "planner" else CODER,
-            "messages": [
-                {"role": "system", "content": f"You are the {role}."},
-                {"role": "user", "content": f"(demo prompt) {text}"},
-            ],
-            "response": f"(demo reply) {text}",
+            "messages": self._messages(role, text),
+            "response": response if response is not None else f"(demo reply) {text}",
             "finish_reason": "stop",
             "usage": {
                 "prompt_tokens": prompt_tokens,
@@ -169,12 +248,7 @@ class DemoRun:
         node_id = self.tree.next_id()
         run_id = f"demo-{node_id}"
         code_path = self.ws.search_dir / "nodes" / f"{node_id}.py"
-        code_path.write_text(
-            f"# PLAN: {step.plan}\nimport pandas as pd\nfrom lightgbm import LGBMClassifier\n\n"
-            "train = pd.read_csv('/data/train.csv')\nprint('STAGE: load')\n"
-            "# ... feature building, 5-fold cross-validation on /data/folds.csv ...\n"
-            "print('STAGE: features')\nprint('STAGE: cv')\nprint('STAGE: predict')\n"
-        )
+        code_path.write_text(script_text(step))
         self._write_run(run_id, step)
         parent = self.tree.get(step.parent) if step.parent else None
         node = Node(
@@ -236,12 +310,51 @@ class DemoRun:
             step = SCRIPT[self.next_step]
             when = start + timedelta(minutes=4 * self.next_step)
             if step.operator != "debug":
-                self._call("planner", self.rng.uniform(20, 70), when, step.plan)
-            self._call("coder", self.rng.uniform(35, 110), when, step.plan)
+                self._call("planner", self.rng.uniform(20, 70), when, step.plan, plan_text(step))
+            self._call("coder", self.rng.uniform(35, 110), when, step.plan, _reply(step))
             if step.status == "ok":
                 self._call("planner", self.rng.uniform(6, 14), when, f"summary of {step.plan}")
             self._write_node(step, when)
             self.next_step += 1
+
+    def _stream(
+        self,
+        role: str,
+        step: Step,
+        seconds: float,
+        sleep: Callable[[float], None],
+        *,
+        ticks: int = 40,
+    ) -> str:
+        """Write a reply a little at a time, the way a model does. Returns the finished reply."""
+        planner = role == "planner"
+        thinking = reasoning_text(step) if planner else ""
+        answer = plan_text(step) if planner else _reply(step)
+        if planner:
+            purpose = "plan a new approach" if step.operator == "draft" else "plan an improvement"
+        else:
+            purpose = "fix the failing script" if step.operator == "debug" else "write the script"
+        self.progress.call_started(
+            role,
+            model=PLANNER if planner else CODER,
+            purpose=purpose,
+            messages=self._messages(role, step.plan),
+        )
+        quiet = ticks // 5  # the wait for the first token
+        thought_end = quiet + (ticks // 5 if thinking else 0)
+        for tick in range(1, ticks + 1):
+            seen_thought = len(thinking) * min(max(tick - quiet, 0), thought_end - quiet)
+            seen_thought //= max(thought_end - quiet, 1)
+            seen_answer = len(answer) * max(tick - thought_end, 0) // (ticks - thought_end)
+            self.progress.call_progress(
+                role,
+                thinking=thinking[:seen_thought],
+                answer=answer[:seen_answer],
+                chunks=(seen_thought + seen_answer) // 4,
+            )
+            sleep(seconds / ticks)
+        self.progress.call_finished(role)
+        return answer
 
     def play(self, *, speed: float = 1.0, sleep: Callable[[float], None] = time.sleep) -> None:
         """Run the remaining steps in real time, moving through the phases a search goes through."""
@@ -249,14 +362,18 @@ class DemoRun:
         while not self.done:
             step = SCRIPT[self.next_step]
             detail = f"from {step.parent}" if step.parent else "new draft"
-            progress.phase("writing", node=self.tree.next_id(), op=step.operator, detail=detail)
-            for role, seconds in (("planner", 3.0), ("coder", 4.0)):
+            progress.phase(
+                "writing",
+                node=self.tree.next_id(),
+                op=step.operator,
+                parent=step.parent,
+                detail=detail,
+            )
+            for role, seconds in (("planner", 6.0), ("coder", 9.0)):
                 if role == "planner" and step.operator == "debug":
                     continue
-                progress.call_started(role)
-                sleep(seconds / speed)
-                progress.call_finished(role)
-                self._call(role, seconds * 12, datetime.now(UTC), step.plan)
+                reply = self._stream(role, step, seconds / speed, sleep)
+                self._call(role, seconds * 6, datetime.now(UTC), step.plan, reply)
             progress.phase("running", detail="sandbox and grader")
             sleep(6.0 / speed)
             progress.phase("evaluating", detail="grading and summarizing")
