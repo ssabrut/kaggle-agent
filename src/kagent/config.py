@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any, Literal
 
 from pydantic import BaseModel, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -41,11 +42,30 @@ class Settings(BaseSettings):
     llm_timeout_s: float = 900
     llm_max_tokens: int = 8192
 
+    # Sampling per role, from each model's card. The coder never thinks. The planner thinks by
+    # default at full effort; `planner_thinking` caps that ("low", "medium"), turns it off, or
+    # leaves the model's own default ("default").
+    planner_thinking: Literal["default", "off", "low", "medium", "xhigh"] = "xhigh"
+    planner_temperature: float = 1.0
+    planner_top_p: float = 0.95
+    planner_top_k: int = 20
+    coder_temperature: float = 1.0
+    coder_top_p: float = 0.95
+    coder_top_k: int = 40
+
     @field_validator("planner_base_url", "coder_base_url")
     @classmethod
     def _base_url(cls, value: str) -> str:
         """Accept either the base URL or the full .../chat/completions URL."""
         return value.rstrip("/").removesuffix("/chat/completions")
+
+    def planner_template_kwargs(self) -> dict[str, Any]:
+        """What to tell the planner's chat template about thinking."""
+        if self.planner_thinking == "off":
+            return {"enable_thinking": False}
+        if self.planner_thinking == "default":
+            return {}
+        return {"reasoning_effort": self.planner_thinking}
 
 
 class CompetitionConfig(BaseModel):

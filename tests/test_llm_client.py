@@ -40,6 +40,41 @@ def test_returns_content_and_sends_openai_payload():
     assert seen["body"]["temperature"] == 0.4
 
 
+def test_sampling_options_and_template_kwargs_are_sent_only_when_set():
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return _reply("ok")
+
+    plain, _ = _client(handler)
+    plain.chat([{"role": "user", "content": "q"}])
+    assert not {"top_p", "top_k", "chat_template_kwargs"} & set(bodies[0])
+
+    tuned, _ = _client(handler, top_p=0.95, top_k=40, template_kwargs={"reasoning_effort": "low"})
+    tuned.chat([{"role": "user", "content": "q"}])
+    assert (bodies[1]["top_p"], bodies[1]["top_k"]) == (0.95, 40)
+    assert bodies[1]["chat_template_kwargs"] == {"reasoning_effort": "low"}
+
+
+def test_a_call_can_override_the_clients_template_kwargs():
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return _reply("ok")
+
+    client, _ = _client(handler, template_kwargs={"reasoning_effort": "medium"})
+    client.chat([{"role": "user", "content": "q"}], template_kwargs={"enable_thinking": False})
+    client.chat([{"role": "user", "content": "q"}])
+
+    assert bodies[0]["chat_template_kwargs"] == {
+        "reasoning_effort": "medium",
+        "enable_thinking": False,
+    }
+    assert bodies[1]["chat_template_kwargs"] == {"reasoning_effort": "medium"}  # not remembered
+
+
 @pytest.mark.parametrize(
     ("raw", "clean"),
     [

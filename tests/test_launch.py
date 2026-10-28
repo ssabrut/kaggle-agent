@@ -8,6 +8,7 @@ import sys
 import pytest
 from pydantic import ValidationError
 
+from kagent.config import Settings
 from kagent.dashboard.launch import (
     Launcher,
     LaunchError,
@@ -96,6 +97,14 @@ def test_defaults_come_from_settings(settings):
         {"coder_model": "two words"},
         {"coder_model": "model;rm"},
         {"coder_model": ""},
+        {"planner_thinking": "max"},
+        {"planner_thinking": "on; rm"},
+        {"planner_temperature": -0.1},
+        {"coder_temperature": 3},
+        {"planner_top_p": 0},
+        {"coder_top_p": 1.5},
+        {"planner_top_k": -1},
+        {"coder_top_k": 5000},
         {"surprise": 1},
     ],
 )
@@ -151,6 +160,33 @@ def test_environment_adds_only_the_chosen_kagent_settings(settings):
     assert env["KAGENT_SANDBOX_CPUS"] == "2.0" and env["KAGENT_SANDBOX_MEMORY"] == "4g"
     assert env["KAGENT_PLANNER_BASE_URL"] == req.planner_base_url
     assert env["KAGENT_WORKSPACES_DIR"] == str(settings.workspaces_dir)
+
+
+def test_sampling_and_thinking_reach_the_search_through_the_environment(settings):
+    req = RunRequest.model_validate(
+        payload(settings, planner_thinking="low", coder_temperature=0.6, coder_top_k=20)
+    )
+
+    env = build_env(req, settings, {})
+
+    assert env["KAGENT_PLANNER_THINKING"] == "low"
+    assert (env["KAGENT_CODER_TEMPERATURE"], env["KAGENT_CODER_TOP_K"]) == ("0.6", "20")
+    assert env["KAGENT_PLANNER_TOP_P"] == "0.95" and env["KAGENT_PLANNER_TOP_K"] == "20"
+
+
+def test_the_environment_values_are_what_the_search_reads_back(settings, monkeypatch):
+    """The page's values must survive the trip through KAGENT_* into Settings."""
+    req = RunRequest.model_validate(
+        payload(settings, planner_thinking="off", planner_temperature=0.7, coder_top_p=0.9)
+    )
+    for key, value in build_env(req, settings, {}).items():
+        monkeypatch.setenv(key, value)
+
+    read = Settings()
+
+    assert read.planner_thinking == "off"
+    assert read.planner_template_kwargs() == {"enable_thinking": False}
+    assert (read.planner_temperature, read.coder_top_p) == (0.7, 0.9)
 
 
 # --- starting -----------------------------------------------------------------------------------

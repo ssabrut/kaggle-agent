@@ -266,6 +266,9 @@ def search(
             "max_debug": max_debug,
             "planner_model": settings.planner_model,
             "coder_model": settings.coder_model,
+            "planner_thinking": settings.planner_thinking,
+            "planner_temperature": settings.planner_temperature,
+            "coder_temperature": settings.coder_temperature,
         },
     )
     typer.echo(f"follow along: kagent dashboard -c {competition}")
@@ -277,7 +280,10 @@ def search(
         role="planner",
         timeout_s=settings.llm_timeout_s,
         max_tokens=settings.llm_max_tokens,
-        temperature=0.7,
+        temperature=settings.planner_temperature,
+        top_p=settings.planner_top_p,
+        top_k=settings.planner_top_k,
+        template_kwargs=settings.planner_template_kwargs(),
         log_path=trajectory,
         observer=progress,
     )
@@ -287,7 +293,9 @@ def search(
         role="coder",
         timeout_s=settings.llm_timeout_s,
         max_tokens=settings.llm_max_tokens,
-        temperature=0.2,
+        temperature=settings.coder_temperature,
+        top_p=settings.coder_top_p,
+        top_k=settings.coder_top_k,
         log_path=trajectory,
         observer=progress,
     )

@@ -208,6 +208,38 @@ def test_summarize_truncates_long_replies():
     )
 
 
+def test_the_summary_is_asked_for_without_thinking():
+    """A thinking planner would spend all 400 tokens of the summary on reasoning."""
+    planner = FakeChat(["ran fine"])
+    summarize(planner, code="c", log="l", metric="auc", cv_score=0.8, cv_std=None)
+    assert planner.options[0]["template_kwargs"] == {"enable_thinking": False}
+
+
+@pytest.mark.parametrize("blank", ["", "   \n"])
+def test_a_planner_that_answers_with_nothing_fails_the_step(ctx, tree, tmp_path, blank):
+    """With thinking on, the budget can run out before the plan is written."""
+    coder = FakeChat([])
+    with pytest.raises(OperatorError, match="no plan"):
+        DraftOperator(FakeChat([blank]), coder).apply(None, ctx)
+
+    parent = _node(tree, tmp_path)
+    with pytest.raises(OperatorError, match="no idea"):
+        ImproveOperator(FakeChat([blank]), coder).apply(parent, ctx)
+    assert coder.calls == []  # the coder is never asked to code an empty plan
+
+
+def test_operators_say_what_each_call_is_for(ctx, tree, tmp_path):
+    planner, coder = FakeChat(["- plan"]), FakeChat([code_block("print(1)")])
+    DraftOperator(planner, coder).apply(None, ctx)
+    assert planner.options[0]["purpose"] == "plan a new approach"
+    assert coder.options[0]["purpose"] == "write the script for the plan"
+
+    parent = _node(tree, tmp_path)
+    debug_coder = FakeChat([code_block("print(2)")])
+    DebugOperator(debug_coder).apply(parent, ctx)
+    assert debug_coder.options[0]["purpose"] == "fix the failing script"
+
+
 def test_long_code_is_clipped_in_prompts(ctx, tree, tmp_path):
     parent = _node(tree, tmp_path, code="x = 1\n" * 10_000)
     planner = FakeChat(["idea"])

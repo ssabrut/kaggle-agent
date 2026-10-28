@@ -80,6 +80,12 @@ def extract_code(text: str) -> str:
     return code + "\n"
 
 
+def _need_text(reply: str, what: str) -> None:
+    """A thinking planner can spend its whole token budget on reasoning and answer with nothing."""
+    if not reply.strip():
+        raise OperatorError(f"the planner returned no {what} (reasoning may have used the budget)")
+
+
 def _write_code(coder: ChatClient, messages: list[Message], purpose: str) -> str:
     """Ask the coder for code; if the reply is unusable, give it one chance to repair."""
     reply = coder.chat(messages, purpose=purpose)
@@ -131,6 +137,7 @@ class DraftOperator:
             ),
             purpose="plan a new approach",
         )
+        _need_text(plan, "plan")
         return _write_code(
             self.coder,
             prompts.code_from_plan(contract_text=ctx.contract(), plan=plan),
@@ -162,6 +169,7 @@ class ImproveOperator:
             ),
             purpose="plan an improvement",
         )
+        _need_text(idea, "idea")
         return _write_code(
             self.coder,
             prompts.code_improve(contract_text=ctx.contract(), code=code, idea=idea),
@@ -194,5 +202,6 @@ def summarize(
         max_tokens=400,
         temperature=0.2,
         purpose="summarize the run",
+        template_kwargs={"enable_thinking": False},  # 400 tokens would all go to reasoning
     )
     return text[:SUMMARY_CHARS]

@@ -8,9 +8,11 @@ class FakeChat:
         self.replies = list(replies)
         self.role = role
         self.calls: list[list[dict]] = []
+        self.options: list[dict] = []  # the keyword arguments of each call
 
     def chat(self, messages, **kwargs):
         self.calls.append(messages)
+        self.options.append(kwargs)
         if not self.replies:
             raise AssertionError(f"{self.role} was called more often than scripted")
         return self.replies.pop(0)

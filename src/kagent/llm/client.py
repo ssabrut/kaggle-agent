@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 
@@ -74,6 +74,9 @@ class ChatClient:
         timeout_s: float = 900,
         max_tokens: int = 8192,
         temperature: float = 0.3,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        template_kwargs: dict[str, Any] | None = None,
         log_path: Path | None = None,
         attempts: int = 3,
         transport: httpx.BaseTransport | None = None,
@@ -87,6 +90,9 @@ class ChatClient:
         self.role = role
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.top_p = top_p
+        self.top_k = top_k
+        self.template_kwargs = dict(template_kwargs or {})
         self.log_path = log_path
         self._attempts = attempts
         self._sleep = sleep
@@ -101,9 +107,14 @@ class ChatClient:
         max_tokens: int | None = None,
         temperature: float | None = None,
         purpose: str = "",
+        template_kwargs: dict[str, Any] | None = None,
     ) -> str:
-        """`purpose` says what the call is for, in a few words, and is only shown to a watcher."""
-        payload = {
+        """`purpose` says what the call is for, in a few words, and is only shown to a watcher.
+
+        `template_kwargs` go to the model's chat template, over the client's own (for example
+        {"enable_thinking": False} for a call that must answer within a few tokens).
+        """
+        payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "max_tokens": max_tokens or self.max_tokens,
@@ -111,6 +122,12 @@ class ChatClient:
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        if self.top_p is not None:
+            payload["top_p"] = self.top_p
+        if self.top_k is not None:
+            payload["top_k"] = self.top_k
+        if kwargs := {**self.template_kwargs, **(template_kwargs or {})}:
+            payload["chat_template_kwargs"] = kwargs
         start = time.monotonic()
         ok = False
         if self.observer:

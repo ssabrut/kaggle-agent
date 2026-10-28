@@ -19,7 +19,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Literal
 from urllib.parse import urlsplit
 
 import httpx
@@ -71,6 +71,13 @@ class RunRequest(BaseModel):
     sandbox_memory: str = Field("8g", pattern=r"^\d{1,3}[mg]$")
     llm_timeout_s: float = Field(900, ge=30, le=7200)
     llm_max_tokens: int = Field(8192, ge=256, le=65536)
+    planner_thinking: Literal["default", "off", "low", "medium", "xhigh"] = "xhigh"
+    planner_temperature: float = Field(1.0, ge=0, le=2)
+    planner_top_p: float = Field(0.95, gt=0, le=1)
+    planner_top_k: int = Field(20, ge=0, le=1000)
+    coder_temperature: float = Field(1.0, ge=0, le=2)
+    coder_top_p: float = Field(0.95, gt=0, le=1)
+    coder_top_k: int = Field(40, ge=0, le=1000)
 
     @field_validator("planner_base_url", "coder_base_url")
     @classmethod
@@ -97,6 +104,13 @@ class RunRequest(BaseModel):
             sandbox_memory=settings.sandbox_memory,
             llm_timeout_s=settings.llm_timeout_s,
             llm_max_tokens=settings.llm_max_tokens,
+            planner_thinking=settings.planner_thinking,
+            planner_temperature=settings.planner_temperature,
+            planner_top_p=settings.planner_top_p,
+            planner_top_k=settings.planner_top_k,
+            coder_temperature=settings.coder_temperature,
+            coder_top_p=settings.coder_top_p,
+            coder_top_k=settings.coder_top_k,
         )
 
 
@@ -130,6 +144,13 @@ def build_env(req: RunRequest, settings: Settings, base: dict[str, str]) -> dict
         "KAGENT_SANDBOX_MEMORY": req.sandbox_memory,
         "KAGENT_LLM_TIMEOUT_S": str(req.llm_timeout_s),
         "KAGENT_LLM_MAX_TOKENS": str(req.llm_max_tokens),
+        "KAGENT_PLANNER_THINKING": req.planner_thinking,
+        "KAGENT_PLANNER_TEMPERATURE": str(req.planner_temperature),
+        "KAGENT_PLANNER_TOP_P": str(req.planner_top_p),
+        "KAGENT_PLANNER_TOP_K": str(req.planner_top_k),
+        "KAGENT_CODER_TEMPERATURE": str(req.coder_temperature),
+        "KAGENT_CODER_TOP_P": str(req.coder_top_p),
+        "KAGENT_CODER_TOP_K": str(req.coder_top_k),
     }
 
 

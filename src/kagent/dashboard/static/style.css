@@ -196,11 +196,11 @@ h1, h2, h3, p { margin: 0; }
 .form legend { padding: 0 6px; font-weight: 600; font-size: 13px; }
 .fields { display: grid; gap: 10px 14px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
 .field label { display: block; font-size: 12.5px; color: var(--ink-2); margin-bottom: 2px; }
-.field input {
+.field input, .field select {
   width: 100%; padding: 6px 8px; font: inherit; color: var(--ink);
   background: var(--page); border: 1px solid var(--axis); border-radius: 8px;
 }
-.field input:focus-visible { outline: 2px solid var(--s1); outline-offset: 1px; }
+.field input:focus-visible, .field select:focus-visible { outline: 2px solid var(--s1); outline-offset: 1px; }
 .field .hint { margin-top: 2px; }
 .form details summary { cursor: pointer; font-weight: 600; font-size: 13px; }
 .checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }

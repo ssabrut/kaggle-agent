@@ -925,6 +925,7 @@
     if (p.num_drafts != null) bits.push(`${p.num_drafts} drafts`);
     if (p.max_debug != null) bits.push(`debug up to ${p.max_debug}`);
     if (p.max_nodes != null) bits.push(`stop after ${p.max_nodes} nodes`);
+    if (p.planner_thinking) bits.push(`planner thinking: ${p.planner_thinking}`);
     $("#params").textContent = bits.join(" · ");
   }
 
@@ -1084,8 +1085,18 @@
     if (atEnd) box.scrollTop = box.scrollHeight;
   }
 
-  const NUMBER_KEYS = ["budget_hours", "max_nodes", "num_drafts", "max_debug", "noise_k", "step_timeout_s", "sandbox_cpus", "llm_timeout_s", "llm_max_tokens"];
-  const TEXT_KEYS = ["planner_base_url", "planner_model", "coder_base_url", "coder_model", "sandbox_memory"];
+  const NUMBER_KEYS = [
+    "budget_hours", "max_nodes", "num_drafts", "max_debug", "noise_k", "step_timeout_s", "sandbox_cpus", "llm_timeout_s", "llm_max_tokens",
+    "planner_temperature", "planner_top_p", "planner_top_k", "coder_temperature", "coder_top_p", "coder_top_k",
+  ];
+  const TEXT_KEYS = ["planner_base_url", "planner_model", "coder_base_url", "coder_model", "sandbox_memory", "planner_thinking"];
+  const THINKING_CHOICES = [
+    ["xhigh", "Full effort (slowest)"],
+    ["medium", "Medium effort"],
+    ["low", "Low effort (fastest)"],
+    ["off", "Off"],
+    ["default", "The model's own default (full effort)"],
+  ];
 
   async function openRunForm() {
     let info;
@@ -1112,6 +1123,14 @@
     };
     const num = (label, key, hint, min, max, step) => field(key, label, hint, { type: "number", min, max, step });
     const text = (label, key, hint) => field(key, label, hint, { type: "text" });
+    const choice = (label, key, hint, options) => {
+      const id = `f-${key}`;
+      const select = h("select", { id }, ...options.map(([value, name]) => h("option", { value, text: name })));
+      select.value = String(defaults[key]);
+      inputs[key] = select;
+      select.addEventListener("change", changed);
+      return h("div", { class: "field" }, h("label", { for: id, text: label }), select, hint ? h("div", { class: "hint", text: hint }) : null);
+    };
 
     const collect = () => {
       const body = {};
@@ -1128,7 +1147,10 @@
       const v = collect();
       const parts = ["kagent search", `-c ${slug}`, `--budget-hours ${v.budget_hours}`, `--num-drafts ${v.num_drafts}`, `--max-debug ${v.max_debug}`, `--noise-k ${v.noise_k}`];
       if (v.max_nodes != null) parts.push(`--max-nodes ${v.max_nodes}`);
-      preview.textContent = parts.join(" ") + `\nplanner ${v.planner_model} at ${v.planner_base_url}\ncoder   ${v.coder_model} at ${v.coder_base_url}`;
+      preview.textContent =
+        parts.join(" ") +
+        `\nplanner ${v.planner_model} at ${v.planner_base_url} (thinking ${v.planner_thinking}, temperature ${v.planner_temperature})` +
+        `\ncoder   ${v.coder_model} at ${v.coder_base_url} (temperature ${v.coder_temperature})`;
     };
 
     const checks = h("ul", { class: "checks" });
@@ -1222,6 +1244,17 @@
             text("Planner model", "planner_model"),
             text("Coder server URL", "coder_base_url", "OpenAI-compatible, ending in /v1"),
             text("Coder model", "coder_model"),
+          ),
+        ),
+        h("fieldset", {}, h("legend", { text: "Sampling and thinking" }),
+          h("div", { class: "fields" },
+            choice("Planner thinking", "planner_thinking", "How long the planner may reason before it answers. The coder does not think.", THINKING_CHOICES),
+            num("Planner temperature", "planner_temperature", "Values from the model card.", 0, 2, 0.05),
+            num("Planner top-p", "planner_top_p", "", 0.05, 1, 0.05),
+            num("Planner top-k", "planner_top_k", "", 0, 1000, 1),
+            num("Coder temperature", "coder_temperature", "Lower repeats itself more; the card says 1.0.", 0, 2, 0.05),
+            num("Coder top-p", "coder_top_p", "", 0.05, 1, 0.05),
+            num("Coder top-k", "coder_top_k", "", 0, 1000, 1),
           ),
         ),
         h("fieldset", {}, h("legend", { text: "Sandbox for each run" }),
